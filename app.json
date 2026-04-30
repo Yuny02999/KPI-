@@ -1,0 +1,43 @@
+{
+    "expo":  {
+                 "name":  "智驾指标记录",
+                 "slug":  "autodrive-metrics-recorder",
+                 "version":  "1.0.3",
+                 "orientation":  "portrait",
+                 "icon":  "./assets/icon.png",
+                 "userInterfaceStyle":  "light",
+                 "splash":  {
+                                "image":  "./assets/icon.png",
+                                "backgroundColor":  "#f5f7fb"
+                            },
+                 "assetBundlePatterns":  [
+                                             "**/*"
+                                         ],
+                 "ios":  {
+                             "supportsTablet":  true,
+                             "bundleIdentifier":  "com.autodrive.metricsrecorder",
+                             "infoPlist":  {
+                                               "NSLocationWhenInUseUsageDescription":  "用于记录路线考点坐标，并在测试过程中判断是否经过考点。"
+                                           }
+                         },
+                 "android":  {
+                                 "package":  "com.autodrive.metricsrecorder",
+                                 "adaptiveIcon":  {
+                                                      "foregroundImage":  "./assets/adaptive-icon.png",
+                                                      "backgroundColor":  "#0B1F33"
+                                                  },
+                                 "permissions":  [
+                                                     "ACCESS_FINE_LOCATION",
+                                                     "ACCESS_COARSE_LOCATION"
+                                                 ]
+                             },
+                 "web":  {
+                             "bundler":  "metro"
+                         },
+                 "extra":  {
+                               "eas":  {
+                                           "projectId":  "f04858cb-3086-4755-a352-e2776f6de0bd"
+                                       }
+                           }
+             }
+}

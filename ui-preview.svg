@@ -1,0 +1,123 @@
+<svg width="1080" height="1920" viewBox="0 0 1080 1920" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1080" y2="1920" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DCE8FF"/>
+      <stop offset="0.52" stop-color="#F5F7FB"/>
+      <stop offset="1" stop-color="#EEF7F2"/>
+    </linearGradient>
+    <filter id="shadow" x="-80" y="-80" width="1240" height="2080" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="26" stdDeviation="38" flood-color="#243042" flood-opacity="0.16"/>
+    </filter>
+    <filter id="soft" x="-40" y="-40" width="1160" height="2000" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="20" flood-color="#243042" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .glass { fill: rgba(255,255,255,0.64); stroke: rgba(255,255,255,0.86); stroke-width: 2; }
+      .title { font: 900 54px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #111827; }
+      .sub { font: 500 28px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #667085; }
+      .section { font: 900 31px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #344054; }
+      .card { font: 900 30px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #fff; }
+      .small { font: 800 22px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #667085; }
+    </style>
+  </defs>
+
+  <rect width="1080" height="1920" fill="url(#bg)"/>
+  <circle cx="980" cy="190" r="250" fill="#BCD2FF" opacity="0.42"/>
+  <circle cx="80" cy="980" r="300" fill="#BFEADC" opacity="0.42"/>
+  <circle cx="900" cy="1510" r="300" fill="#DDEBFF" opacity="0.55"/>
+
+  <rect x="74" y="48" width="932" height="1824" rx="86" fill="#111827" filter="url(#shadow)"/>
+  <rect x="94" y="68" width="892" height="1784" rx="70" fill="#F5F7FB"/>
+  <rect x="94" y="68" width="892" height="282" rx="70" fill="#DCE8FF"/>
+  <rect x="94" y="1400" width="892" height="452" rx="70" fill="#EEF7F2"/>
+
+  <rect x="148" y="126" width="784" height="150" rx="18" class="glass" filter="url(#soft)"/>
+  <text x="184" y="196" class="title">自动驾驶性能指标</text>
+  <text x="186" y="236" class="sub">点击卡片记录一次事件，适合路测快速打点</text>
+  <rect x="710" y="155" width="180" height="86" rx="16" fill="rgba(255,255,255,0.58)" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+  <text x="742" y="194" font-family="Arial" font-size="34" font-weight="900" fill="#1D4ED8">128</text>
+  <text x="822" y="194" font-family="Arial" font-size="34" font-weight="900" fill="#1D4ED8">7</text>
+  <line x1="807" y1="170" x2="807" y2="226" stroke="#667085" stroke-opacity="0.24" stroke-width="2"/>
+  <text x="744" y="226" class="small">总次数</text>
+  <text x="828" y="226" class="small">已触发</text>
+
+  <rect x="148" y="300" width="784" height="98" rx="18" class="glass" filter="url(#soft)"/>
+  <text x="184" y="340" class="small">最高频问题</text>
+  <text x="184" y="378" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="34" font-weight="900" fill="#111827">路口通行动态交互</text>
+  <text x="868" y="366" text-anchor="end" font-family="Arial" font-size="52" font-weight="900" fill="#EF6408">42次</text>
+
+  <rect x="148" y="424" width="784" height="174" rx="18" class="glass" filter="url(#soft)"/>
+  <rect x="178" y="454" width="724" height="58" rx="14" fill="rgba(255,255,255,0.78)" stroke="rgba(102,112,133,0.18)" stroke-width="2"/>
+  <text x="204" y="493" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="28" fill="#7C8790">新增指标，例如：红绿灯识别迟滞</text>
+  <rect x="178" y="528" width="96" height="44" rx="14" fill="#F76B0B"/>
+  <rect x="286" y="528" width="96" height="44" rx="14" fill="rgba(255,255,255,0.72)" stroke="rgba(102,112,133,0.16)" stroke-width="2"/>
+  <rect x="394" y="528" width="96" height="44" rx="14" fill="rgba(255,255,255,0.72)" stroke="rgba(102,112,133,0.16)" stroke-width="2"/>
+  <rect x="514" y="528" width="388" height="44" rx="14" fill="#F76B0B"/>
+  <text x="226" y="558" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="22" font-weight="900" fill="#fff">场景</text>
+  <text x="334" y="558" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="22" font-weight="900" fill="#475467">路口</text>
+  <text x="442" y="558" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="22" font-weight="900" fill="#475467">变道</text>
+  <text x="708" y="558" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="24" font-weight="900" fill="#fff">加入当前类别</text>
+
+  <rect x="148" y="622" width="784" height="76" rx="18" class="glass" filter="url(#soft)"/>
+  <rect x="172" y="638" width="226" height="44" rx="14" fill="#1F2937"/>
+  <rect x="426" y="638" width="226" height="44" rx="14" fill="#1F2937"/>
+  <rect x="680" y="638" width="226" height="44" rx="14" fill="rgba(255,255,255,0.70)" stroke="rgba(239,100,8,0.50)" stroke-width="2"/>
+  <text x="285" y="668" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="24" font-weight="900" fill="#fff">撤回</text>
+  <text x="539" y="668" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="24" font-weight="900" fill="#fff">导出数据</text>
+  <text x="793" y="668" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Arial" font-size="24" font-weight="900" fill="#C2410C">清零</text>
+
+  <text x="150" y="764" class="section">场景性能指标</text>
+  <text x="878" y="764" text-anchor="end" font-family="Arial" font-size="28" font-weight="900" fill="#F76B0B">6次</text>
+  <rect x="150" y="792" width="240" height="122" rx="18" fill="#F76B0B" filter="url(#soft)"/>
+  <text x="176" y="833" class="card"># 施工场景</text>
+  <rect x="304" y="868" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <text x="334" y="890" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">6次</text>
+
+  <text x="150" y="984" class="section">路口性能指标</text>
+  <text x="878" y="984" text-anchor="end" font-family="Arial" font-size="28" font-weight="900" fill="#31A64A">52次</text>
+  <rect x="150" y="1012" width="240" height="122" rx="18" fill="#31A64A" filter="url(#soft)"/>
+  <rect x="414" y="1012" width="240" height="122" rx="18" fill="#31A64A" filter="url(#soft)"/>
+  <text x="176" y="1053" class="card"># 路口通行</text>
+  <text x="196" y="1088" class="card">动态交互</text>
+  <text x="440" y="1053" class="card"># 左转待转区</text>
+  <rect x="304" y="1088" width="72" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <rect x="568" y="1088" width="72" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <text x="340" y="1110" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">42次</text>
+  <text x="604" y="1110" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">10次</text>
+
+  <text x="150" y="1204" class="section">变道性能指标</text>
+  <text x="878" y="1204" text-anchor="end" font-family="Arial" font-size="28" font-weight="900" fill="#9563E8">13次</text>
+  <rect x="150" y="1232" width="240" height="122" rx="18" fill="#9563E8" filter="url(#soft)"/>
+  <rect x="414" y="1232" width="240" height="122" rx="18" fill="#9563E8" filter="url(#soft)"/>
+  <text x="176" y="1273" class="card"># 汇入</text>
+  <text x="440" y="1273" class="card"># 汇出</text>
+  <rect x="316" y="1308" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <rect x="580" y="1308" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <text x="346" y="1330" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">8次</text>
+  <text x="610" y="1330" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">5次</text>
+
+  <text x="150" y="1424" class="section">体感性能指标</text>
+  <rect x="150" y="1452" width="240" height="122" rx="18" fill="#4F7FF0" filter="url(#soft)"/>
+  <rect x="414" y="1452" width="240" height="122" rx="18" fill="#4F7FF0" filter="url(#soft)"/>
+  <rect x="678" y="1452" width="240" height="122" rx="18" fill="#4F7FF0" filter="url(#soft)"/>
+  <text x="176" y="1493" class="card"># 车辆Cutin</text>
+  <text x="440" y="1493" class="card"># 非预期制动</text>
+  <text x="704" y="1493" class="card"># 非预期横向</text>
+  <rect x="316" y="1528" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <rect x="580" y="1528" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <rect x="844" y="1528" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <text x="346" y="1550" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">3次</text>
+  <text x="610" y="1550" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">9次</text>
+  <text x="874" y="1550" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">1次</text>
+
+  <text x="150" y="1644" class="section">绕行性能指标</text>
+  <rect x="150" y="1672" width="240" height="122" rx="18" fill="#18AA98" filter="url(#soft)"/>
+  <rect x="414" y="1672" width="240" height="122" rx="18" fill="#18AA98" filter="url(#soft)"/>
+  <text x="176" y="1713" class="card"># 绕行</text>
+  <text x="440" y="1713" class="card"># 小路/窄路</text>
+  <text x="460" y="1748" class="card">动态交互</text>
+  <rect x="316" y="1748" width="60" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <rect x="568" y="1748" width="72" height="30" rx="15" fill="rgba(255,255,255,0.24)"/>
+  <text x="346" y="1770" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">2次</text>
+  <text x="604" y="1770" text-anchor="middle" font-family="Arial" font-size="22" font-weight="900" fill="#fff">12次</text>
+</svg>

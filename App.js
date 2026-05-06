@@ -32,6 +32,20 @@ const blurProps = {
   tint: "light",
   experimentalBlurMethod: "dimezisBlurView"
 };
+const CHECKPOINT_LOCATION_TIMEOUT_MS = 12000;
+const CHECKPOINT_LAST_LOCATION_MAX_AGE_MS = 30000;
+const CHECKPOINT_STALE_LOCATION_MAX_AGE_MS = 5 * 60 * 1000;
+const CHECKPOINT_GOOD_ACCURACY_METERS = 30;
+const CHECKPOINT_WEAK_ACCURACY_METERS = 50;
+
+function withTimeout(promise, timeoutMs, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(message)), timeoutMs);
+    })
+  ]);
+}
 
 const metricGroups = [
   { id: "scenario", title: "场景性能指标", color: "#f76b0b", metrics: ["施工场景"] },
@@ -108,6 +122,7 @@ const calculatedMetricItems = [
 
 const defaultSession = {
   name: "默认测试任务",
+  taskType: "drive",
   route: "",
   vehicle: "",
   version: "",
@@ -285,6 +300,105 @@ function calculateDistanceMeters(first, second) {
 function formatCoordinate(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(6) : "-";
+}
+
+function formatLocationAccuracy(coords) {
+  const accuracy = Number(coords?.accuracy);
+  return Number.isFinite(accuracy) ? `±${Math.round(accuracy)}m` : "精度未知";
+}
+
+function getCheckpointLocationQuality(coords, updatedAt, status) {
+  if (!coords || !updatedAt) {
+    if (status === "等待定位信号" || status === "等待定位回调") {
+      return {
+        label: "等待定位",
+        tone: "pending",
+        description: "还没有拿到坐标，请确认手机定位和精确位置已开启"
+      };
+    }
+    if (
+      status === "正在检查定位权限" ||
+      status === "正在启动定位监听" ||
+      status === "正在启动定位刷新" ||
+      status === "正在主动获取定位"
+    ) {
+      return {
+        label: status === "正在主动获取定位" ? "主动定位中" : "定位启动中",
+        tone: "pending",
+        description:
+          status === "正在主动获取定位"
+            ? "正在主动读取当前位置"
+            : "正在连接手机定位服务"
+      };
+    }
+    if (status === "定位权限未开启" || status === "设备定位未开启") {
+      return {
+        label: "定位不可用",
+        tone: "failed",
+        description: "请开启定位权限和系统定位服务"
+      };
+    }
+    return {
+      label: "定位预热中",
+      tone: "pending",
+      description: "进入页面后会自动获取当前位置"
+    };
+  }
+
+  const ageMs = Date.now() - updatedAt;
+  if (ageMs > CHECKPOINT_LAST_LOCATION_MAX_AGE_MS) {
+    if (
+      status === "定位预热中" ||
+      status === "正在刷新定位" ||
+      status === "等待定位信号" ||
+      status === "等待定位回调" ||
+      status === "正在启动定位监听" ||
+      status === "正在启动定位刷新" ||
+      status === "正在主动获取定位"
+    ) {
+      return {
+        label: "定位刷新中",
+        tone: "pending",
+        description: "正在更新当前位置"
+      };
+    }
+    return {
+      label: "定位已过期",
+      tone: "failed",
+      description: "正在重新获取当前位置"
+    };
+  }
+
+  const accuracy = Number(coords.accuracy);
+  if (!Number.isFinite(accuracy)) {
+    return {
+      label: "可打点",
+      tone: "ready",
+      description: "已获取当前位置，精度未知"
+    };
+  }
+
+  if (accuracy <= CHECKPOINT_GOOD_ACCURACY_METERS) {
+    return {
+      label: "定位良好",
+      tone: "ready",
+      description: `${formatLocationAccuracy(coords)}，适合记录考点`
+    };
+  }
+
+  if (accuracy <= CHECKPOINT_WEAK_ACCURACY_METERS) {
+    return {
+      label: "定位可用",
+      tone: "warning",
+      description: `${formatLocationAccuracy(coords)}，可记录但建议确认位置`
+    };
+  }
+
+  return {
+    label: "精度较弱",
+    tone: "failed",
+    description: `${formatLocationAccuracy(coords)}，保存前会二次确认`
+  };
 }
 
 function getCheckpointPerformanceOption(id) {
@@ -538,13 +652,20 @@ export default function App() {
   const [calculatorMileage, setCalculatorMileage] = useState("");
   const [calculatorInputs, setCalculatorInputs] = useState({});
   const [routeCheckpoints, setRouteCheckpoints] = useState([]);
+  const [cloudCheckpointSets, setCloudCheckpointSets] = useState([]);
+  const [checkpointCloudName, setCheckpointCloudName] = useState("");
+  const [checkpointCloudLoading, setCheckpointCloudLoading] = useState(false);
   const [checkpointRecords, setCheckpointRecords] = useState([]);
   const [checkpointDraftName, setCheckpointDraftName] = useState("");
   const [checkpointDraftType, setCheckpointDraftType] = useState("");
   const [checkpointDraftNote, setCheckpointDraftNote] = useState("");
   const [checkpointRadius, setCheckpointRadius] = useState("50");
   const [currentLocation, setCurrentLocation] = useState(null);
+  const [currentLocationUpdatedAt, setCurrentLocationUpdatedAt] = useState(null);
   const [locationStatus, setLocationStatus] = useState("未开启定位");
+  const [locationDebugText, setLocationDebugText] = useState("尚未诊断");
+  const [checkpointLocating, setCheckpointLocating] = useState(false);
+  const [checkpointListeningEnabled, setCheckpointListeningEnabled] = useState(false);
   const [pendingCheckpoint, setPendingCheckpoint] = useState(null);
   const [checkpointPerformance, setCheckpointPerformance] = useState("normal");
   const [checkpointNote, setCheckpointNote] = useState("");
@@ -566,7 +687,10 @@ export default function App() {
   const navIdleTimer = useRef(null);
   const statusIdleTimer = useRef(null);
   const locationSubscription = useRef(null);
+  const checkpointPreviewSubscription = useRef(null);
   const checkpointAlertedIds = useRef(new Set());
+  const currentLocationRef = useRef(null);
+  const checkpointActiveRequestId = useRef(0);
   const pageContentStyle = useMemo(
     () => [styles.scrollContent, isTabletLayout && styles.scrollContentTablet],
     [isTabletLayout]
@@ -643,6 +767,15 @@ export default function App() {
     const value = parseNonNegativeNumber(checkpointRadius);
     return value === null || value <= 0 ? 50 : value;
   }, [checkpointRadius]);
+  const isCheckpointRecordingTask = taskStarted && session.taskType === "checkpoint";
+  const isDriveTaskStarted = taskStarted && session.taskType !== "checkpoint";
+  const checkpointMonitorActive = taskStarted && checkpointListeningEnabled;
+  const checkpointPreviewActive =
+    activeTab === "checkpoint" || isCheckpointRecordingTask || checkpointMonitorActive;
+  const checkpointLocationQuality = useMemo(
+    () => getCheckpointLocationQuality(currentLocation, currentLocationUpdatedAt, locationStatus),
+    [currentLocation, currentLocationUpdatedAt, locationStatus, clockTick]
+  );
   const calculatorMileageValue = useMemo(
     () => parseNonNegativeNumber(calculatorMileage),
     [calculatorMileage]
@@ -660,6 +793,15 @@ export default function App() {
     const timer = setInterval(() => setClockTick(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [taskStarted]);
+
+  useEffect(() => {
+    if (activeTab !== "checkpoint" || taskStarted) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => setClockTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activeTab, taskStarted]);
 
   useEffect(() => {
     if (!loaded) {
@@ -750,12 +892,77 @@ export default function App() {
   }, [checkpointRecords, routeCheckpoints, session.startedAt]);
 
   useEffect(() => {
-    if (!taskStarted) {
+    if (!checkpointPreviewActive) {
+      if (checkpointPreviewSubscription.current) {
+        checkpointPreviewSubscription.current.remove();
+        checkpointPreviewSubscription.current = null;
+      }
+      return undefined;
+    }
+
+    let cancelled = false;
+    async function startCheckpointPreview() {
+      try {
+        setLocationStatus("正在检查定位权限");
+        const ready = await ensureLocationReady();
+        if (!ready) {
+          return;
+        }
+
+        setLocationStatus("正在主动获取定位");
+        requestCheckpointLocation();
+
+        setLocationStatus("正在启动定位刷新");
+        const subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Low,
+            distanceInterval: 1,
+            timeInterval: 1000
+          },
+          (position) => {
+            if (!cancelled) {
+              updateCurrentLocation(position.coords, "定位已更新");
+            }
+          },
+          (error) => {
+            if (!cancelled) {
+              setLocationStatus("定位刷新失败");
+              setLocationDebugText(String(error?.message ?? error).slice(0, 80));
+            }
+          }
+        );
+        if (cancelled) {
+          subscription.remove();
+          return;
+        }
+        checkpointPreviewSubscription.current = subscription;
+        if (!currentLocationRef.current) {
+          setLocationStatus("正在主动获取定位");
+        }
+      } catch (error) {
+        setLocationStatus(`定位启动失败：${String(error?.message ?? error).slice(0, 24)}`);
+      }
+    }
+
+    startCheckpointPreview();
+    return () => {
+      cancelled = true;
+      if (checkpointPreviewSubscription.current) {
+        checkpointPreviewSubscription.current.remove();
+        checkpointPreviewSubscription.current = null;
+      }
+    };
+  }, [checkpointPreviewActive]);
+
+  useEffect(() => {
+    if (!checkpointMonitorActive) {
       if (locationSubscription.current) {
         locationSubscription.current.remove();
         locationSubscription.current = null;
       }
-      setLocationStatus("未开始测试");
+      if (!checkpointPreviewActive) {
+        setLocationStatus("未开始测试");
+      }
       return undefined;
     }
 
@@ -809,7 +1016,7 @@ export default function App() {
       }
     };
   }, [
-    taskStarted,
+    checkpointMonitorActive,
     routeCheckpoints,
     checkpointRadiusValue,
     session.startedAt,
@@ -950,7 +1157,7 @@ export default function App() {
       clearTimeout(navIdleTimer.current);
     }
 
-    if (activeTab !== "record") {
+    if (activeTab !== "record" || taskMenuOpen) {
       navIdleTimer.current = null;
       return;
     }
@@ -958,6 +1165,20 @@ export default function App() {
     navIdleTimer.current = setTimeout(() => {
       setNavVisible(false);
     }, 3000);
+  }
+
+  function toggleTaskMenu() {
+    setNavVisible(true);
+    setTaskMenuOpen((current) => {
+      const next = !current;
+      if (next && navIdleTimer.current) {
+        clearTimeout(navIdleTimer.current);
+        navIdleTimer.current = null;
+      } else if (!next) {
+        scheduleNavHide();
+      }
+      return next;
+    });
   }
 
   function setStatusBarCollapsed(collapsed) {
@@ -1113,63 +1334,254 @@ export default function App() {
     }
   }
 
-  async function getCurrentPositionForCheckpoint() {
-    const permission = await Location.requestForegroundPermissionsAsync();
+  function updateCurrentLocation(coords, status = "已获取当前位置") {
+    currentLocationRef.current = coords;
+    setCurrentLocation(coords);
+    setCurrentLocationUpdatedAt(Date.now());
+    setLocationStatus(status);
+    setLocationDebugText(
+      `坐标 ${formatCoordinate(coords?.latitude)}, ${formatCoordinate(coords?.longitude)} · ${formatLocationAccuracy(coords)}`
+    );
+  }
+
+  function formatProviderStatus(provider) {
+    if (!provider) {
+      return "Provider 未返回";
+    }
+
+    return [
+      `服务${provider.locationServicesEnabled ? "开" : "关"}`,
+      `GPS${provider.gpsAvailable === false ? "不可用" : "可用"}`,
+      `网络${provider.networkAvailable === false ? "不可用" : "可用"}`,
+      `被动${provider.passiveAvailable === false ? "不可用" : "可用"}`
+    ].join(" / ");
+  }
+
+  async function readProviderStatus() {
+    const provider = await Location.getProviderStatusAsync().catch(() => null);
+    const text = formatProviderStatus(provider);
+    setLocationDebugText(text);
+    return provider;
+  }
+
+  async function ensureLocationReady({ showErrors = false } = {}) {
+    const existingPermission = await Location.getForegroundPermissionsAsync();
+    const permission =
+      existingPermission.status === "granted"
+        ? existingPermission
+        : await Location.requestForegroundPermissionsAsync();
+    setLocationDebugText(
+      `权限 ${permission.status}${permission.android?.accuracy ? ` / ${permission.android.accuracy}` : ""}`
+    );
     if (permission.status !== "granted") {
       setLocationStatus("定位权限未开启");
-      showDialog({
-        title: "定位权限未开启",
-        message: "请在系统设置中允许 App 使用前台定位后，再记录路线考点。"
-      });
+      if (showErrors) {
+        showDialog({
+          title: "定位权限未开启",
+          message: "请在系统设置中允许 App 使用前台定位后，再记录路线考点。"
+        });
+      }
+      return false;
+    }
+
+    setLocationStatus("定位权限已开启");
+    const provider = await readProviderStatus();
+    const servicesEnabled =
+      provider?.locationServicesEnabled ??
+      (await Location.hasServicesEnabledAsync().catch(() => true));
+    if (!servicesEnabled) {
+      setLocationStatus("设备定位未开启");
+      if (showErrors) {
+        showDialog({
+          title: "设备定位未开启",
+          message: "请先打开手机系统定位服务，再记录路线考点。"
+        });
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  async function getLastUsablePosition(maxAge = CHECKPOINT_STALE_LOCATION_MAX_AGE_MS) {
+    return Location.getLastKnownPositionAsync({
+      maxAge
+    }).catch(() => null);
+  }
+
+  async function getFreshPosition(timeoutMs, accuracy = Location.Accuracy.Low) {
+    return withTimeout(
+      Location.getCurrentPositionAsync({
+        accuracy,
+        mayShowUserSettingsDialog: true
+      }),
+      timeoutMs,
+      "checkpoint-location-timeout"
+    );
+  }
+
+  async function getBestEffortCurrentPosition() {
+    const attempts = [
+      { label: "低精度", accuracy: Location.Accuracy.Lowest, timeout: 8000 },
+      { label: "网络定位", accuracy: Location.Accuracy.Low, timeout: 10000 },
+      { label: "均衡定位", accuracy: Location.Accuracy.Balanced, timeout: 12000 }
+    ];
+
+    let lastError = null;
+    for (const attempt of attempts) {
+      setLocationStatus(`正在主动获取定位-${attempt.label}`);
+      setLocationDebugText(`尝试 ${attempt.label}`);
+      try {
+        const position = await getFreshPosition(attempt.timeout, attempt.accuracy);
+        return { position, label: attempt.label };
+      } catch (error) {
+        lastError = error;
+        setLocationDebugText(`${attempt.label}失败：${String(error?.message ?? error).slice(0, 36)}`);
+      }
+    }
+
+    throw lastError ?? new Error("location-unavailable");
+  }
+
+  async function requestCheckpointLocation({ showErrors = false } = {}) {
+    const requestId = checkpointActiveRequestId.current + 1;
+    checkpointActiveRequestId.current = requestId;
+    const ready = await ensureLocationReady({ showErrors });
+    if (!ready || checkpointActiveRequestId.current !== requestId) {
       return null;
     }
 
-    setLocationStatus("正在获取当前位置");
-    const position = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High
-    });
-    setCurrentLocation(position.coords);
-    setLocationStatus("已获取当前位置");
-    return position.coords;
+    setLocationStatus("正在主动获取定位");
+    const recentPosition = await getLastUsablePosition();
+    if (checkpointActiveRequestId.current !== requestId) {
+      return null;
+    }
+    if (recentPosition?.coords) {
+      updateCurrentLocation(recentPosition.coords, "已获取最近定位");
+    }
+
+    try {
+      const { position, label } = await getBestEffortCurrentPosition();
+      if (checkpointActiveRequestId.current !== requestId) {
+        return null;
+      }
+      updateCurrentLocation(position.coords, `主动定位成功-${label}`);
+      return position.coords;
+    } catch (error) {
+      if (recentPosition?.coords) {
+        setLocationStatus("使用最近定位");
+        return recentPosition.coords;
+      }
+      setLocationStatus("主动定位失败");
+      await readProviderStatus();
+      if (showErrors) {
+        showDialog({
+          title: "主动定位失败",
+          message: "没有获取到当前位置。请确认系统定位、精确位置、Expo Go 定位权限已开启，并先打开地图 App 看是否能定位。"
+        });
+      }
+      return null;
+    }
+  }
+
+  async function runLocationDiagnostics() {
+    triggerHaptic();
+    setLocationStatus("定位诊断中");
+    const permission = await Location.getForegroundPermissionsAsync().catch(() => null);
+    const provider = await Location.getProviderStatusAsync().catch(() => null);
+    const lastPosition = await getLastUsablePosition();
+    const parts = [
+      `权限：${permission?.status ?? "未知"}${permission?.android?.accuracy ? ` / ${permission.android.accuracy}` : ""}`,
+      `Provider：${formatProviderStatus(provider)}`,
+      `最近定位：${lastPosition?.coords ? `${formatCoordinate(lastPosition.coords.latitude)}, ${formatCoordinate(lastPosition.coords.longitude)} · ${formatLocationAccuracy(lastPosition.coords)}` : "无"}`
+    ];
+    setLocationDebugText(parts.join("；"));
+    const coords = await requestCheckpointLocation({ showErrors: true });
+    if (coords) {
+      showDialog({
+        title: "定位诊断通过",
+        message: `已获取坐标：${formatCoordinate(coords.latitude)}, ${formatCoordinate(coords.longitude)} · ${formatLocationAccuracy(coords)}`
+      });
+    }
+  }
+
+  async function getCurrentPositionForCheckpoint() {
+    return requestCheckpointLocation({ showErrors: true });
   }
 
   async function addRouteCheckpoint() {
+    if (checkpointLocating) {
+      return;
+    }
     triggerHaptic();
     const name = checkpointDraftName.trim();
     if (!name) {
       showDialog({ title: "请填写考点名称", message: "打点前需要先填写考点名称。" });
       return;
     }
+    setCheckpointLocating(true);
     try {
-      const coords = await getCurrentPositionForCheckpoint();
+      const type = checkpointDraftType.trim() || "普通考点";
+      const note = checkpointDraftNote.trim();
+      const coords =
+        currentLocation &&
+        currentLocationUpdatedAt &&
+        Date.now() - currentLocationUpdatedAt <= CHECKPOINT_STALE_LOCATION_MAX_AGE_MS
+          ? currentLocation
+          : await getCurrentPositionForCheckpoint();
       if (!coords) {
         return;
       }
-      const createdAt = now();
-      setRouteCheckpoints((current) => [
-        ...current,
-        {
-          id: createId("checkpoint"),
-          name,
-          type: checkpointDraftType.trim() || "普通考点",
-          note: checkpointDraftNote.trim(),
-          latitude: coords.latitude,
-          longitude: coords.longitude,
-          accuracy: coords.accuracy,
-          createdAt
-        }
-      ]);
-      setCheckpointDraftName("");
-      setCheckpointDraftType("");
-      setCheckpointDraftNote("");
-      showDialog({ title: "考点已记录", message: `已保存「${name}」当前位置。` });
+      if (Number(coords.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS) {
+        showDialog({
+          title: "当前定位精度较弱",
+          message: `当前精度约 ${formatLocationAccuracy(coords)}，建议确认车辆确实在考点附近。是否仍然保存？`,
+          actions: [
+            { text: "取消", variant: "ghost" },
+            {
+              text: "仍然保存",
+              variant: "primary",
+              onPress: () => saveRouteCheckpoint(name, coords, type, note)
+            }
+          ]
+        });
+        return;
+      }
+      saveRouteCheckpoint(name, coords, type, note);
     } catch (error) {
       setLocationStatus("定位失败");
       showDialog({
-        title: "打点失败",
-        message: "没有获取到当前位置，请确认 GPS 已开启并在空旷位置重试。"
+        title: error?.message === "checkpoint-location-timeout" ? "定位超时" : "打点失败",
+        message:
+          error?.message === "checkpoint-location-timeout"
+            ? "本次没有在 9 秒内获取到定位。请确认 GPS 已开启，或走到空旷位置后再试。"
+            : "没有获取到当前位置，请确认 GPS 已开启并在空旷位置重试。"
       });
+    } finally {
+      setCheckpointLocating(false);
     }
+  }
+
+  function saveRouteCheckpoint(name, coords, type, note) {
+    const createdAt = now();
+    setRouteCheckpoints((current) => [
+      ...current,
+      {
+        id: createId("checkpoint"),
+        name,
+        type,
+        note,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy,
+        createdAt,
+        lowAccuracy: Number(coords.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS
+      }
+    ]);
+    setCheckpointDraftName("");
+    setCheckpointDraftType("");
+    setCheckpointDraftNote("");
+    showDialog({ title: "考点已记录", message: `已保存「${name}」当前位置。` });
   }
 
   function deleteRouteCheckpoint(checkpoint) {
@@ -1192,6 +1604,255 @@ export default function App() {
     });
   }
 
+  function getSupabaseConfigForAction() {
+    const baseUrl = supabaseUrl.trim().replace(/\/+$/, "");
+    const anonKey = supabaseAnonKey.trim();
+    if (!baseUrl || !anonKey) {
+      showDialog({
+        title: "缺少 Supabase 配置",
+        message: "请先到设置页填写 Supabase Project URL 和 anon public key。"
+      });
+      return null;
+    }
+
+    return { baseUrl, anonKey };
+  }
+
+  function getSupabaseHeaders(anonKey, prefer = "return=representation") {
+    return {
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+      "Content-Type": "application/json",
+      Prefer: prefer
+    };
+  }
+
+  function sanitizeCheckpointForCloud(checkpoint, index) {
+    return {
+      id: checkpoint.id || createId("checkpoint"),
+      name: checkpoint.name || `考点${index + 1}`,
+      type: checkpoint.type || "普通考点",
+      note: checkpoint.note || "",
+      latitude: Number(checkpoint.latitude),
+      longitude: Number(checkpoint.longitude),
+      accuracy: Number.isFinite(Number(checkpoint.accuracy))
+        ? Number(checkpoint.accuracy)
+        : null,
+      lowAccuracy: !!checkpoint.lowAccuracy,
+      createdAt: checkpoint.createdAt || now(),
+      orderIndex: index
+    };
+  }
+
+  function normalizeCloudCheckpoints(items, mode = "replace") {
+    if (!Array.isArray(items)) {
+      return [];
+    }
+
+    return items
+      .map((checkpoint, index) => {
+        const latitude = Number(checkpoint.latitude);
+        const longitude = Number(checkpoint.longitude);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          return null;
+        }
+
+        return {
+          id:
+            mode === "merge"
+              ? createId("checkpoint")
+              : checkpoint.id || createId("checkpoint"),
+          name: checkpoint.name || `考点${index + 1}`,
+          type: checkpoint.type || "普通考点",
+          note: checkpoint.note || "",
+          latitude,
+          longitude,
+          accuracy: Number.isFinite(Number(checkpoint.accuracy))
+            ? Number(checkpoint.accuracy)
+            : null,
+          createdAt: checkpoint.createdAt || now(),
+          lowAccuracy:
+            checkpoint.lowAccuracy ??
+            Number(checkpoint.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function getCheckpointCloudName() {
+    const draft = checkpointCloudName.trim();
+    if (draft) {
+      return draft;
+    }
+
+    const routeName =
+      session.route && session.route !== "考点采集" ? session.route : "共享考点路线";
+    const dateText = new Date().toLocaleDateString("zh-CN").replace(/\//g, "-");
+    return `${routeName}-${dateText}`;
+  }
+
+  async function uploadCheckpointsToSupabase() {
+    triggerHaptic();
+    if (routeCheckpoints.length === 0) {
+      showDialog({
+        title: "暂无考点",
+        message: "请先在第一阶段记录至少一个考点，再上传到云端。"
+      });
+      return;
+    }
+
+    const config = getSupabaseConfigForAction();
+    if (!config) {
+      return;
+    }
+
+    const checkpointSetName = getCheckpointCloudName();
+    const payload = {
+      id: createId("checkpoint-set"),
+      name: checkpointSetName,
+      route: session.route || null,
+      vehicle: session.vehicle || null,
+      version: session.version || null,
+      staff: session.staff || null,
+      checkpoint_count: routeCheckpoints.length,
+      checkpoints: routeCheckpoints.map(sanitizeCheckpointForCloud),
+      updated_at: now()
+    };
+
+    setCheckpointCloudLoading(true);
+    try {
+      const response = await fetch(`${config.baseUrl}/rest/v1/checkpoint_sets`, {
+        method: "POST",
+        headers: getSupabaseHeaders(config.anonKey),
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text}`);
+      }
+
+      setCheckpointCloudName("");
+      await fetchCheckpointSetsFromSupabase({ silent: true });
+      showDialog({
+        title: "上传成功",
+        message: `已将「${checkpointSetName}」的 ${routeCheckpoints.length} 个考点上传到云端。`
+      });
+    } catch (error) {
+      showDialog({
+        title: "上传失败",
+        message: `请确认已在 Supabase 执行 supabase-schema.sql，并检查网络和 key。\n${String(error?.message ?? error).slice(0, 160)}`
+      });
+    } finally {
+      setCheckpointCloudLoading(false);
+    }
+  }
+
+  async function fetchCheckpointSetsFromSupabase(options = {}) {
+    const config = getSupabaseConfigForAction();
+    if (!config) {
+      return;
+    }
+
+    setCheckpointCloudLoading(true);
+    try {
+      const query =
+        "select=id,name,route,vehicle,version,staff,checkpoint_count,created_at,updated_at&order=updated_at.desc&limit=30";
+      const response = await fetch(`${config.baseUrl}/rest/v1/checkpoint_sets?${query}`, {
+        method: "GET",
+        headers: getSupabaseHeaders(config.anonKey, "return=minimal")
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      setCloudCheckpointSets(Array.isArray(data) ? data : []);
+      if (!options.silent) {
+        showDialog({
+          title: "刷新完成",
+          message: `已读取 ${Array.isArray(data) ? data.length : 0} 条云端考点路线。`
+        });
+      }
+    } catch (error) {
+      showDialog({
+        title: "刷新失败",
+        message: `没有读取到云端考点库。\n${String(error?.message ?? error).slice(0, 160)}`
+      });
+    } finally {
+      setCheckpointCloudLoading(false);
+    }
+  }
+
+  async function downloadCheckpointSetFromSupabase(checkpointSet) {
+    triggerHaptic();
+    const config = getSupabaseConfigForAction();
+    if (!config) {
+      return;
+    }
+
+    setCheckpointCloudLoading(true);
+    try {
+      const response = await fetch(
+        `${config.baseUrl}/rest/v1/checkpoint_sets?id=eq.${encodeURIComponent(checkpointSet.id)}&select=*`,
+        {
+          method: "GET",
+          headers: getSupabaseHeaders(config.anonKey, "return=minimal")
+        }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      const remoteSet = Array.isArray(data) ? data[0] : null;
+      const remoteCheckpoints = normalizeCloudCheckpoints(remoteSet?.checkpoints, "replace");
+      if (remoteCheckpoints.length === 0) {
+        showDialog({
+          title: "无法导入",
+          message: "这条云端路线没有可用的考点坐标。"
+        });
+        return;
+      }
+
+      showDialog({
+        title: "导入云端考点",
+        message: `「${remoteSet.name || checkpointSet.name}」包含 ${remoteCheckpoints.length} 个考点。覆盖会替换当前考点，合并会追加到最后。`,
+        actions: [
+          { text: "取消", variant: "ghost" },
+          {
+            text: "合并导入",
+            variant: "ghost",
+            onPress: () => {
+              const merged = normalizeCloudCheckpoints(remoteSet.checkpoints, "merge");
+              setRouteCheckpoints((current) => [...current, ...merged]);
+            }
+          },
+          {
+            text: "覆盖本地",
+            variant: "primary",
+            onPress: () => {
+              setRouteCheckpoints(remoteCheckpoints);
+              setCheckpointCursorIndex(0);
+              checkpointAlertedIds.current = new Set();
+            }
+          }
+        ]
+      });
+    } catch (error) {
+      showDialog({
+        title: "下载失败",
+        message: `没有下载到这条考点路线。\n${String(error?.message ?? error).slice(0, 160)}`
+      });
+    } finally {
+      setCheckpointCloudLoading(false);
+    }
+  }
+
   function findNextCheckpointIndex(startIndex = 0) {
     const safeStart = Math.max(0, startIndex);
     const nextIndex = routeCheckpoints.findIndex(
@@ -1206,9 +1867,8 @@ export default function App() {
   }
 
   function handleLocationUpdate(coords) {
-    setCurrentLocation(coords);
-    setLocationStatus("定位监听中");
-    if (!taskStarted || pendingCheckpoint || routeCheckpoints.length === 0) {
+    updateCurrentLocation(coords, "定位监听中");
+    if (!checkpointListeningEnabled || !taskStarted || pendingCheckpoint || routeCheckpoints.length === 0) {
       return;
     }
 
@@ -1273,6 +1933,41 @@ export default function App() {
     }
     setPendingCheckpoint(null);
     setCheckpointNote("");
+  }
+
+  function toggleCheckpointListening() {
+    triggerHaptic();
+    if (!taskStarted) {
+      showDialog({
+        title: "请先开始任务",
+        message: "测试监听需要先创建任务。若只是采集考点，请选择“考点记录”任务。"
+      });
+      return;
+    }
+    if (routeCheckpoints.length === 0) {
+      showDialog({
+        title: "暂无考点",
+        message: "请先在第一阶段记录至少一个考点，再开始测试监听。"
+      });
+      return;
+    }
+
+    setCheckpointListeningEnabled((current) => {
+      const next = !current;
+      if (next) {
+        checkpointAlertedIds.current = new Set(
+          checkpointRecords
+            .filter((record) => record.sessionStartedAt === session.startedAt)
+            .map((record) => record.checkpointId)
+        );
+        setCheckpointCursorIndex(findNextCheckpointIndex(0));
+        setLocationStatus("准备测试监听");
+      } else {
+        setPendingCheckpoint(null);
+        setLocationStatus("定位已更新");
+      }
+      return next;
+    });
   }
 
   function updateMetric(id, updater) {
@@ -1751,6 +2446,7 @@ export default function App() {
       vehicle: "",
       version: "",
       staff: session.staff,
+      taskType: session.taskType ?? "drive",
       startMileage: "",
       endMileage: "",
       testMileage: "",
@@ -1769,13 +2465,16 @@ export default function App() {
       return;
     }
 
-    const requiredFields = [
-      ["任务名称", newSessionDraft.name],
-      ["测试路线", newSessionDraft.route],
-      ["车辆编号", newSessionDraft.vehicle],
-      ["软件版本", newSessionDraft.version],
-      ["记录人/安全员", newSessionDraft.staff]
-    ];
+    const isCheckpointTask = newSessionDraft.taskType === "checkpoint";
+    const requiredFields = isCheckpointTask
+      ? []
+      : [
+          ["任务名称", newSessionDraft.name],
+          ["测试路线", newSessionDraft.route],
+          ["车辆编号", newSessionDraft.vehicle],
+          ["软件版本", newSessionDraft.version],
+          ["记录人/安全员", newSessionDraft.staff]
+        ];
     const missingFields = requiredFields
       .filter(([, value]) => !value.trim())
       .map(([label]) => label);
@@ -1787,11 +2486,20 @@ export default function App() {
 
     const nextSession = {
       ...newSessionDraft,
-      name: newSessionDraft.name.trim(),
-      route: newSessionDraft.route.trim(),
-      vehicle: newSessionDraft.vehicle.trim(),
-      version: newSessionDraft.version.trim(),
-      staff: newSessionDraft.staff.trim(),
+      name: isCheckpointTask
+        ? `考点记录 ${new Date().toLocaleString("zh-CN", {
+            hour12: false,
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          })}`
+        : newSessionDraft.name.trim(),
+      route: isCheckpointTask ? "考点采集" : newSessionDraft.route.trim(),
+      vehicle: isCheckpointTask ? "未填写" : newSessionDraft.vehicle.trim(),
+      version: isCheckpointTask ? "未填写" : newSessionDraft.version.trim(),
+      staff: isCheckpointTask ? newSessionDraft.staff.trim() || "未填写" : newSessionDraft.staff.trim(),
+      taskType: isCheckpointTask ? "checkpoint" : "drive",
       startMileage: "",
       endMileage: "",
       testMileage: "",
@@ -1808,6 +2516,9 @@ export default function App() {
           onPress: () => {
             setSession(nextSession);
             setTaskStarted(true);
+            setCheckpointListeningEnabled(false);
+            setCheckpointCursorIndex(0);
+            checkpointAlertedIds.current = new Set();
             setClockTick(Date.now());
             setMetrics((current) =>
               current.map((metric) => ({ ...metric, count: 0, updatedAt: now() }))
@@ -1815,9 +2526,18 @@ export default function App() {
             setEvents([]);
             setProblemRecords([]);
             setNewSessionModalVisible(false);
+            if (nextSession.taskType === "checkpoint") {
+              setActiveTab("checkpoint");
+            }
             showDialog({
-              title: "测试任务已开始",
-              message: "请确认运动相机持续录像，当前记录将归入正式测试任务。"
+              title:
+                nextSession.taskType === "checkpoint"
+                  ? "考点记录任务已开始"
+                  : "测试任务已开始",
+              message:
+                nextSession.taskType === "checkpoint"
+                  ? "当前仅开启定位采点，不会判断经过考点。需要验证路线时，请在考点页点击“开始测试监听”。"
+                  : "请确认运动相机持续录像。需要路线考点判断时，请在考点页点击“开始测试监听”。"
             });
           }
         }
@@ -2024,6 +2744,33 @@ export default function App() {
       return;
     }
 
+    if (session.taskType === "checkpoint") {
+      showDialog({
+        title: "结束考点记录",
+        message: "将停止当前考点采集任务，不会生成历史数据，也不会保存到数据页。已记录的考点会继续保留。",
+        actions: [
+          { text: "取消", variant: "ghost" },
+          {
+            text: "结束",
+            onPress: () => {
+              setTaskStarted(false);
+              setCheckpointListeningEnabled(false);
+              setPendingCheckpoint(null);
+              setSession((current) => ({
+                ...current,
+                startedAt: now()
+              }));
+              showDialog({
+                title: "考点记录已结束",
+                message: "未生成历史数据。路线考点列表已保留，可继续用于后续测试监听。"
+              });
+            }
+          }
+        ]
+      });
+      return;
+    }
+
     if (events.length === 0 && problemRecords.length === 0) {
       showDialog({ title: "没有可结束的数据", message: "当前任务还没有问题样本或事件记录。" });
       return;
@@ -2061,6 +2808,8 @@ export default function App() {
               startedAt: now()
             }));
             setTaskStarted(false);
+            setCheckpointListeningEnabled(false);
+            setPendingCheckpoint(null);
 
             if (cloudResult.cloudStatus === "synced") {
               showDialog({ title: "任务已结束", message: "数据已保存到本机，并同步到云端。" });
@@ -2403,7 +3152,7 @@ export default function App() {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
           style={styles.screen}
         >
-          {(taskStarted || activeTab === "record") && renderTaskStatusBar()}
+          {(isDriveTaskStarted || activeTab === "record") && renderTaskStatusBar()}
 
           {activeTab === "record" && (
             <ScrollView
@@ -2745,8 +3494,57 @@ export default function App() {
                   <Text style={styles.settingTitle}>记录考点</Text>
                 </View>
                 <Text style={styles.settingDesc}>
-                  这一阶段不需要开始测试。到达考点附近后填写名称并点击打点，App 只获取一次当前位置并保存 GPS 坐标。
+                  这一阶段不需要开始测试。进入页面后会先预热定位，到达考点附近后填写名称并保存最近一次有效坐标。
                 </Text>
+                <View style={styles.locationWarmupCard}>
+                  <View style={styles.locationWarmupTop}>
+                    <View style={styles.settingText}>
+                      <Text style={styles.locationWarmupTitle}>定位状态</Text>
+                      <Text style={styles.locationWarmupDesc}>
+                        {locationStatus} · {checkpointLocationQuality.description}
+                      </Text>
+                    </View>
+                    <Text
+                      style={[
+                        styles.locationQualityBadge,
+                        checkpointLocationQuality.tone === "ready" &&
+                          styles.locationQualityReady,
+                        checkpointLocationQuality.tone === "warning" &&
+                          styles.locationQualityWarning,
+                        checkpointLocationQuality.tone === "failed" &&
+                          styles.locationQualityFailed
+                      ]}
+                    >
+                      {checkpointLocationQuality.label}
+                    </Text>
+                  </View>
+                  <Text style={styles.checkpointCoordinateText}>
+                    当前：{formatCoordinate(currentLocation?.latitude)}, {formatCoordinate(currentLocation?.longitude)} · {formatLocationAccuracy(currentLocation)}
+                  </Text>
+                  <Text style={styles.locationDebugText} numberOfLines={3}>
+                    诊断：{locationDebugText}
+                  </Text>
+                  <View style={styles.locationActionRow}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.locationMiniButton,
+                        pressed && styles.buttonPressed
+                      ]}
+                      onPress={() => requestCheckpointLocation({ showErrors: true })}
+                    >
+                      <Text style={styles.locationMiniButtonText}>重新定位</Text>
+                    </Pressable>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.locationMiniButton,
+                        pressed && styles.buttonPressed
+                      ]}
+                      onPress={runLocationDiagnostics}
+                    >
+                      <Text style={styles.locationMiniButtonText}>定位诊断</Text>
+                    </Pressable>
+                  </View>
+                </View>
                 <TextInput
                   value={checkpointDraftName}
                   onChangeText={setCheckpointDraftName}
@@ -2772,12 +3570,27 @@ export default function App() {
                 <Pressable
                   style={({ pressed }) => [
                     styles.problemSubmitButton,
-                    pressed && styles.buttonPressed
+                    checkpointLocating && styles.buttonDisabled,
+                    pressed && !checkpointLocating && styles.buttonPressed
                   ]}
                   onPress={addRouteCheckpoint}
+                  disabled={checkpointLocating}
                 >
-                  <Text style={styles.problemSubmitText}>打点记录考点</Text>
+                  <Text style={styles.problemSubmitText}>
+                    {checkpointLocating ? "正在定位..." : "保存当前定位为考点"}
+                  </Text>
                 </Pressable>
+                {isCheckpointRecordingTask && (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.modalGhostButton,
+                      pressed && styles.buttonPressed
+                    ]}
+                    onPress={endCurrentTask}
+                  >
+                    <Text style={styles.modalGhostText}>结束考点记录</Text>
+                  </Pressable>
+                )}
               </GlassView>
 
               <GlassView style={styles.problemRecentCard}>
@@ -2804,10 +3617,12 @@ export default function App() {
                           </Text>
                           <Text style={styles.eventNote} numberOfLines={1}>
                             {distance === null ? "距离待定位" : `距当前位置 ${Math.round(distance)}m`}
+                            {` · 精度 ${formatLocationAccuracy(checkpoint)}`}
+                            {checkpoint.lowAccuracy ? " · 低精度" : ""}
                             {checkpoint.note ? ` · ${checkpoint.note}` : ""}
                           </Text>
                         </View>
-                        {index === checkpointCursorIndex && taskStarted && (
+                        {index === checkpointCursorIndex && checkpointListeningEnabled && (
                           <Text style={[styles.statusBadge, styles.statusSynced]}>监听</Text>
                         )}
                         <Pressable
@@ -2822,25 +3637,122 @@ export default function App() {
                 )}
               </GlassView>
 
+              <GlassView style={styles.problemRecentCard}>
+                <View style={styles.problemPanelHeader}>
+                  <View style={styles.eventBody}>
+                    <Text style={styles.problemPanelTitle}>云端考点库</Text>
+                    <Text style={styles.settingDesc}>
+                      上传当前考点路线，其他测试员填写同一套 Supabase 配置后可刷新并下载。
+                    </Text>
+                  </View>
+                  <Text style={[styles.statusBadge, styles.statusLocal]}>
+                    {checkpointCloudLoading ? "同步中" : "共享"}
+                  </Text>
+                </View>
+                <TextInput
+                  value={checkpointCloudName}
+                  onChangeText={setCheckpointCloudName}
+                  placeholder="云端路线名称，留空则自动生成"
+                  placeholderTextColor="#7c8790"
+                  style={styles.input}
+                />
+                <View style={styles.checkpointCloudActions}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.checkpointCloudButton,
+                      checkpointCloudLoading && styles.buttonDisabled,
+                      pressed && !checkpointCloudLoading && styles.buttonPressed
+                    ]}
+                    onPress={uploadCheckpointsToSupabase}
+                    disabled={checkpointCloudLoading}
+                  >
+                    <Text style={styles.checkpointCloudButtonText}>上传当前考点</Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.checkpointCloudButtonGhost,
+                      checkpointCloudLoading && styles.buttonDisabled,
+                      pressed && !checkpointCloudLoading && styles.buttonPressed
+                    ]}
+                    onPress={() => fetchCheckpointSetsFromSupabase()}
+                    disabled={checkpointCloudLoading}
+                  >
+                    <Text style={styles.checkpointCloudButtonGhostText}>刷新云端</Text>
+                  </Pressable>
+                </View>
+                {cloudCheckpointSets.length === 0 ? (
+                  <Text style={styles.emptyText}>
+                    暂无云端路线。首次使用前请先在 Supabase 执行项目里的 supabase-schema.sql。
+                  </Text>
+                ) : (
+                  <View style={styles.checkpointCloudList}>
+                    {cloudCheckpointSets.map((checkpointSet) => (
+                      <View key={checkpointSet.id} style={styles.checkpointCloudItem}>
+                        <View style={styles.eventBody}>
+                          <Text style={styles.eventTitle} numberOfLines={1}>
+                            {checkpointSet.name || "未命名考点路线"}
+                          </Text>
+                          <Text style={styles.eventMeta} numberOfLines={1}>
+                            {checkpointSet.route || "未填写路线"} · {checkpointSet.checkpoint_count ?? 0} 个考点
+                          </Text>
+                          <Text style={styles.eventNote} numberOfLines={1}>
+                            更新：{formatDate(checkpointSet.updated_at || checkpointSet.created_at)}
+                          </Text>
+                        </View>
+                        <Pressable
+                          style={styles.reportActionButton}
+                          onPress={() => downloadCheckpointSetFromSupabase(checkpointSet)}
+                        >
+                          <Text style={styles.reportActionText}>下载</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </GlassView>
+
               <GlassView style={styles.checkpointStatusCard}>
                 <View style={styles.checkpointStageHeader}>
                   <Text style={styles.checkpointStageBadge}>第二阶段</Text>
                   <Text style={styles.settingTitle}>测试监听</Text>
                 </View>
                 <Text style={styles.settingDesc}>
-                  只有点击“开始测试”进入正式任务后，App 才会持续监听当前位置；并严格按照考点添加顺序，只判断当前待经过考点。
+                  只有点击下方按钮后，App 才会按照考点添加顺序判断是否经过考点；考点记录任务默认只采集定位，不会自动触发弹窗。
                 </Text>
                 <View style={styles.checkpointStatusTop}>
                   <View style={styles.settingText}>
                     <Text style={styles.settingTitle}>监听状态</Text>
                     <Text style={styles.settingDesc}>
-                      {taskStarted ? locationStatus : "未开始测试，不会监听考点"} · 触发半径 {checkpointRadiusValue}m
+                      {checkpointListeningEnabled
+                        ? locationStatus
+                        : taskStarted
+                          ? "任务已开始，测试监听未开启"
+                          : "未开始任务，不会监听考点"} · 触发半径 {checkpointRadiusValue}m
                     </Text>
                   </View>
-                  <Text style={[styles.statusBadge, taskStarted ? styles.statusSynced : styles.statusLocal]}>
-                    {taskStarted ? "监听中" : "未监听"}
+                  <Text style={[styles.statusBadge, checkpointListeningEnabled ? styles.statusSynced : styles.statusLocal]}>
+                    {checkpointListeningEnabled ? "监听中" : "未监听"}
                   </Text>
                 </View>
+                <Pressable
+                  style={({ pressed }) => [
+                    checkpointListeningEnabled
+                      ? styles.modalGhostButton
+                      : styles.modalPrimaryButton,
+                    pressed && styles.buttonPressed
+                  ]}
+                  onPress={toggleCheckpointListening}
+                >
+                  <Text
+                    style={
+                      checkpointListeningEnabled
+                        ? styles.modalGhostText
+                        : styles.modalPrimaryText
+                    }
+                  >
+                    {checkpointListeningEnabled ? "停止测试监听" : "开始测试监听"}
+                  </Text>
+                </Pressable>
                 <Text style={styles.checkpointCoordinateText}>
                   当前：{formatCoordinate(currentLocation?.latitude)}, {formatCoordinate(currentLocation?.longitude)}
                 </Text>
@@ -3362,41 +4274,46 @@ export default function App() {
             pointerEvents={navTouchable ? "auto" : "none"}
             style={[styles.navBarWrap, navAnimatedStyle]}
           >
-            {(taskStarted || activeTab === "record") && (
+            {(isDriveTaskStarted || activeTab === "record") && (
               <View style={styles.bottomTaskMenuDock}>
                 {taskMenuOpen && (
                   <GlassView style={styles.taskMenu}>
                     <Text style={styles.taskMenuTitle} numberOfLines={1}>
-                      {session.name || "未命名测试任务"}
+                      {taskStarted ? session.name || "未命名测试任务" : "当前无进行中任务"}
                     </Text>
                     <Text style={styles.taskMenuDesc} numberOfLines={1}>
-                      {problemRecords.length} 条样本 · {session.route || "未填写路线"}
+                      {taskStarted
+                        ? `${problemRecords.length} 条样本 · ${session.route || "未填写路线"}`
+                        : "可以创建行车测试或考点记录任务"}
                     </Text>
                     <View style={styles.taskMenuActions}>
-                      <Pressable
-                        style={({ pressed }) => [
-                          styles.taskMenuButton,
-                          pressed && styles.buttonPressed
-                        ]}
-                        onPress={() => {
-                          setTaskMenuOpen(false);
-                          startNewSession();
-                        }}
-                      >
-                        <Text style={styles.taskMenuButtonText}>新任务</Text>
-                      </Pressable>
-                      <Pressable
-                        style={({ pressed }) => [
-                          styles.taskMenuPrimaryButton,
-                          pressed && styles.buttonPressed
-                        ]}
-                        onPress={() => {
-                          setTaskMenuOpen(false);
-                          endCurrentTask();
-                        }}
-                      >
-                        <Text style={styles.taskMenuPrimaryText}>结束任务</Text>
-                      </Pressable>
+                      {taskStarted ? (
+                        <Pressable
+                          style={({ pressed }) => [
+                            styles.taskMenuPrimaryButton,
+                            pressed && styles.buttonPressed
+                          ]}
+                          onPress={() => {
+                            setTaskMenuOpen(false);
+                            endCurrentTask();
+                          }}
+                        >
+                          <Text style={styles.taskMenuPrimaryText}>结束任务</Text>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          style={({ pressed }) => [
+                            styles.taskMenuPrimaryButton,
+                            pressed && styles.buttonPressed
+                          ]}
+                          onPress={() => {
+                            setTaskMenuOpen(false);
+                            startNewSession();
+                          }}
+                        >
+                          <Text style={styles.taskMenuPrimaryText}>新任务</Text>
+                        </Pressable>
+                      )}
                     </View>
                   </GlassView>
                 )}
@@ -3426,25 +4343,23 @@ export default function App() {
                   </Text>
                 </Pressable>
               ))}
-              {(taskStarted || activeTab === "record") && (
+              {(isDriveTaskStarted || activeTab === "record") && (
                 <Pressable
                   style={[
                     styles.navItem,
                     styles.navTaskItem,
                     taskMenuOpen && styles.navItemActive,
-                    taskStarted && styles.navTaskItemActive
+                    isDriveTaskStarted && styles.navTaskItemActive
                   ]}
                   onPress={() => {
                     triggerHaptic();
-                    setNavVisible(true);
-                    scheduleNavHide();
-                    setTaskMenuOpen((current) => !current);
+                    toggleTaskMenu();
                   }}
                 >
                   <Text
                     style={[
                       styles.navText,
-                      (taskMenuOpen || taskStarted) && styles.navTextActive
+                      (taskMenuOpen || isDriveTaskStarted) && styles.navTextActive
                     ]}
                   >
                     {taskMenuOpen ? "收起" : "任务"}
@@ -3535,52 +4450,88 @@ export default function App() {
           <View style={styles.modalBackdrop}>
             <GlassView style={styles.modalCard}>
               <Text style={styles.modalTitle}>创建测试任务</Text>
-              <Text style={styles.modalSubtitle}>请填写本次测试的基础信息，创建后当前记录会清零</Text>
-              <TextInput
-                value={newSessionDraft.name}
-                onChangeText={(value) =>
-                  setNewSessionDraft((current) => ({ ...current, name: value }))
-                }
-                placeholder="任务名称（必填）"
-                placeholderTextColor="#7c8790"
-                style={styles.input}
-              />
-              <TextInput
-                value={newSessionDraft.route}
-                onChangeText={(value) =>
-                  setNewSessionDraft((current) => ({ ...current, route: value }))
-                }
-                placeholder="测试路线（必填）"
-                placeholderTextColor="#7c8790"
-                style={styles.input}
-              />
-              <TextInput
-                value={newSessionDraft.vehicle}
-                onChangeText={(value) =>
-                  setNewSessionDraft((current) => ({ ...current, vehicle: value }))
-                }
-                placeholder="车辆编号（必填）"
-                placeholderTextColor="#7c8790"
-                style={styles.input}
-              />
-              <TextInput
-                value={newSessionDraft.version}
-                onChangeText={(value) =>
-                  setNewSessionDraft((current) => ({ ...current, version: value }))
-                }
-                placeholder="软件版本（必填）"
-                placeholderTextColor="#7c8790"
-                style={styles.input}
-              />
-              <TextInput
-                value={newSessionDraft.staff}
-                onChangeText={(value) =>
-                  setNewSessionDraft((current) => ({ ...current, staff: value }))
-                }
-                placeholder="记录人/安全员（必填）"
-                placeholderTextColor="#7c8790"
-                style={styles.input}
-              />
+              <Text style={styles.modalSubtitle}>
+                {newSessionDraft.taskType === "checkpoint"
+                  ? "考点记录模式只用于采点定位，不需要填写测试任务信息"
+                  : "请填写本次测试的基础信息，创建后当前记录会清零"}
+              </Text>
+              <Text style={styles.problemLabel}>任务类型</Text>
+              <View style={styles.problemResultRow}>
+                {[
+                  ["drive", "行车测试"],
+                  ["checkpoint", "考点记录"]
+                ].map(([type, label]) => (
+                  <Pressable
+                    key={type}
+                    style={[
+                      styles.problemResultButton,
+                      newSessionDraft.taskType === type && styles.problemResultButtonActive
+                    ]}
+                    onPress={() =>
+                      setNewSessionDraft((current) => ({ ...current, taskType: type }))
+                    }
+                  >
+                    <Text
+                      style={[
+                        styles.problemResultText,
+                        newSessionDraft.taskType === type &&
+                          styles.problemResultTextActive
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              {newSessionDraft.taskType !== "checkpoint" && (
+                <>
+                  <TextInput
+                    value={newSessionDraft.name}
+                    onChangeText={(value) =>
+                      setNewSessionDraft((current) => ({ ...current, name: value }))
+                    }
+                    placeholder="任务名称（必填）"
+                    placeholderTextColor="#7c8790"
+                    style={styles.input}
+                  />
+                  <TextInput
+                    value={newSessionDraft.route}
+                    onChangeText={(value) =>
+                      setNewSessionDraft((current) => ({ ...current, route: value }))
+                    }
+                    placeholder="测试路线（必填）"
+                    placeholderTextColor="#7c8790"
+                    style={styles.input}
+                  />
+                  <TextInput
+                    value={newSessionDraft.vehicle}
+                    onChangeText={(value) =>
+                      setNewSessionDraft((current) => ({ ...current, vehicle: value }))
+                    }
+                    placeholder="车辆编号（必填）"
+                    placeholderTextColor="#7c8790"
+                    style={styles.input}
+                  />
+                  <TextInput
+                    value={newSessionDraft.version}
+                    onChangeText={(value) =>
+                      setNewSessionDraft((current) => ({ ...current, version: value }))
+                    }
+                    placeholder="软件版本（必填）"
+                    placeholderTextColor="#7c8790"
+                    style={styles.input}
+                  />
+                  <TextInput
+                    value={newSessionDraft.staff}
+                    onChangeText={(value) =>
+                      setNewSessionDraft((current) => ({ ...current, staff: value }))
+                    }
+                    placeholder="记录人/安全员（必填）"
+                    placeholderTextColor="#7c8790"
+                    style={styles.input}
+                  />
+                </>
+              )}
               <View style={styles.modalActions}>
                 <Pressable
                   style={styles.modalGhostButton}
@@ -4032,6 +4983,9 @@ const styles = StyleSheet.create({
     opacity: 0.78,
     transform: [{ scale: 0.98 }]
   },
+  buttonDisabled: {
+    opacity: 0.62
+  },
   metricSection: {
     marginBottom: 18
   },
@@ -4382,6 +5336,79 @@ const styles = StyleSheet.create({
     gap: 10,
     padding: 10
   },
+  locationWarmupCard: {
+    backgroundColor: "rgba(15,23,42,0.04)",
+    borderColor: "rgba(15,23,42,0.08)",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 8,
+    marginBottom: 10,
+    padding: 10
+  },
+  locationWarmupTop: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "space-between"
+  },
+  locationWarmupTitle: {
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  locationWarmupDesc: {
+    color: "#667085",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 3
+  },
+  locationQualityBadge: {
+    backgroundColor: "rgba(102,112,133,0.12)",
+    borderRadius: 8,
+    color: "#475467",
+    fontSize: 11,
+    fontWeight: "900",
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 5
+  },
+  locationQualityReady: {
+    backgroundColor: "rgba(34,197,94,0.14)",
+    color: "#15803d"
+  },
+  locationQualityWarning: {
+    backgroundColor: "rgba(245,158,11,0.16)",
+    color: "#b45309"
+  },
+  locationQualityFailed: {
+    backgroundColor: "rgba(239,68,68,0.14)",
+    color: "#b91c1c"
+  },
+  locationDebugText: {
+    color: "#667085",
+    fontSize: 11,
+    fontWeight: "700",
+    lineHeight: 16
+  },
+  locationActionRow: {
+    flexDirection: "row",
+    gap: 8
+  },
+  locationMiniButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.78)",
+    borderColor: "rgba(102,112,133,0.18)",
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 36
+  },
+  locationMiniButtonText: {
+    color: "#344054",
+    fontSize: 12,
+    fontWeight: "900"
+  },
   checkpointStatusCard: {
     gap: 10,
     marginBottom: 12,
@@ -4481,6 +5508,51 @@ const styles = StyleSheet.create({
   },
   checkpointChoiceTextActive: {
     color: "#ffffff"
+  },
+  checkpointCloudActions: {
+    flexDirection: "row",
+    gap: 8
+  },
+  checkpointCloudButton: {
+    alignItems: "center",
+    backgroundColor: "#111827",
+    borderRadius: 8,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 42
+  },
+  checkpointCloudButtonGhost: {
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderColor: "rgba(102,112,133,0.18)",
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 42
+  },
+  checkpointCloudButtonText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  checkpointCloudButtonGhostText: {
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  checkpointCloudList: {
+    gap: 8
+  },
+  checkpointCloudItem: {
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.58)",
+    borderColor: "rgba(102,112,133,0.12)",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    padding: 10
   },
   problemMetricRow: {
     alignItems: "center",

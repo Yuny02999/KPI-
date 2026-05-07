@@ -19,3 +19,8 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 .DS_Store
+
+!APK_versions/
+!APK_versions/*.apk
+!APK_versions/VERSION_NOTES.md
+!autodrive-metrics-latest-release.apk

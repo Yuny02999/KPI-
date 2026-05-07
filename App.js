@@ -13,6 +13,7 @@ import {
   LayoutAnimation,
   Linking,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -33,10 +34,17 @@ const blurProps = {
   experimentalBlurMethod: "dimezisBlurView"
 };
 const CHECKPOINT_LOCATION_TIMEOUT_MS = 12000;
-const CHECKPOINT_LAST_LOCATION_MAX_AGE_MS = 30000;
+const CHECKPOINT_HIGH_ACCURACY_TIMEOUT_MS = 18000;
+const CHECKPOINT_LAST_LOCATION_MAX_AGE_MS = 15000;
 const CHECKPOINT_STALE_LOCATION_MAX_AGE_MS = 5 * 60 * 1000;
-const CHECKPOINT_GOOD_ACCURACY_METERS = 30;
+const CHECKPOINT_GOOD_ACCURACY_METERS = 20;
 const CHECKPOINT_WEAK_ACCURACY_METERS = 50;
+const CHECKPOINT_TARGET_ACCURACY_METERS = 30;
+const TASK_FLOAT_WIDTH = 96;
+const TASK_FLOAT_HEIGHT = 50;
+const TASK_FLOAT_COLLAPSED_WIDTH = 32;
+const TASK_FLOAT_MARGIN = 18;
+const TASK_FLOAT_BOTTOM_OFFSET = 86;
 
 function withTimeout(promise, timeoutMs, message) {
   return Promise.race([
@@ -401,6 +409,14 @@ function getCheckpointLocationQuality(coords, updatedAt, status) {
   };
 }
 
+function getBestNavigationAccuracy() {
+  return (
+    Location.Accuracy.BestForNavigation ??
+    Location.Accuracy.Highest ??
+    Location.Accuracy.High
+  );
+}
+
 function getCheckpointPerformanceOption(id) {
   return (
     checkpointPerformanceOptions.find((option) => option.id === id) ??
@@ -622,7 +638,7 @@ function normalizeMetrics(items) {
 }
 
 export default function App() {
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const isTabletLayout = windowWidth >= 768;
   const [metrics, setMetrics] = useState(initialMetrics);
   const [events, setEvents] = useState([]);
@@ -676,6 +692,16 @@ export default function App() {
   const [clockTick, setClockTick] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
   const [startupVisible, setStartupVisible] = useState(true);
+  const [taskFloatPosition, setTaskFloatPosition] = useState(() => ({
+    x: windowWidth - TASK_FLOAT_COLLAPSED_WIDTH,
+    y: Math.max(
+      TASK_FLOAT_MARGIN,
+      windowHeight - TASK_FLOAT_HEIGHT - TASK_FLOAT_BOTTOM_OFFSET
+    )
+  }));
+  const [taskFloatDragging, setTaskFloatDragging] = useState(false);
+  const [taskFloatCollapsed, setTaskFloatCollapsed] = useState(true);
+  const [taskFloatSide, setTaskFloatSide] = useState("right");
   const pulseValue = useMemo(() => new Animated.Value(0), []);
   const calculatorExportValue = useMemo(() => new Animated.Value(1), []);
   const navValue = useMemo(() => new Animated.Value(1), []);
@@ -691,6 +717,9 @@ export default function App() {
   const checkpointAlertedIds = useRef(new Set());
   const currentLocationRef = useRef(null);
   const checkpointActiveRequestId = useRef(0);
+  const taskFloatPositionRef = useRef(taskFloatPosition);
+  const taskFloatStartPosition = useRef(taskFloatPosition);
+  const taskFloatDragged = useRef(false);
   const pageContentStyle = useMemo(
     () => [styles.scrollContent, isTabletLayout && styles.scrollContentTablet],
     [isTabletLayout]
@@ -707,6 +736,115 @@ export default function App() {
       width: isTabletLayout ? "31.6%" : "48%"
     }),
     [isTabletLayout]
+  );
+  const taskFloatBounds = useMemo(
+    () => ({
+      minX: -TASK_FLOAT_WIDTH + TASK_FLOAT_COLLAPSED_WIDTH,
+      maxX: Math.max(TASK_FLOAT_MARGIN, windowWidth - TASK_FLOAT_WIDTH - TASK_FLOAT_MARGIN),
+      minY: TASK_FLOAT_MARGIN,
+      maxY: Math.max(
+        TASK_FLOAT_MARGIN,
+        windowHeight - TASK_FLOAT_HEIGHT - TASK_FLOAT_BOTTOM_OFFSET
+      )
+    }),
+    [windowHeight, windowWidth]
+  );
+  const taskFloatStyle = useMemo(
+    () => ({
+      left: taskFloatPosition.x,
+      top: taskFloatPosition.y,
+      width: TASK_FLOAT_WIDTH
+    }),
+    [taskFloatPosition]
+  );
+  const taskFloatMenuStyle = useMemo(() => {
+    const menuWidth = Math.min(260, Math.max(230, windowWidth - TASK_FLOAT_MARGIN * 2));
+    const nearRightSide =
+      taskFloatPosition.x + TASK_FLOAT_WIDTH / 2 > windowWidth / 2;
+    const left = nearRightSide ? TASK_FLOAT_WIDTH - menuWidth : 0;
+    return {
+      left,
+      width: menuWidth
+    };
+  }, [taskFloatPosition.x, windowWidth]);
+
+  function updateTaskFloatPosition(nextPosition) {
+    taskFloatPositionRef.current = nextPosition;
+    setTaskFloatPosition(nextPosition);
+  }
+
+  function getTaskFloatPositionForSide(side, y = taskFloatPositionRef.current.y, collapsed = taskFloatCollapsed) {
+    const x =
+      side === "right"
+        ? collapsed
+          ? windowWidth - TASK_FLOAT_COLLAPSED_WIDTH
+          : taskFloatBounds.maxX
+        : collapsed
+          ? -TASK_FLOAT_WIDTH + TASK_FLOAT_COLLAPSED_WIDTH
+          : TASK_FLOAT_MARGIN;
+    return {
+      x,
+      y: Math.min(taskFloatBounds.maxY, Math.max(taskFloatBounds.minY, y))
+    };
+  }
+
+  function setTaskFloatDock(side, y, collapsed = taskFloatCollapsed) {
+    setTaskFloatSide(side);
+    updateTaskFloatPosition(getTaskFloatPositionForSide(side, y, collapsed));
+  }
+
+  const taskFloatPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          Math.abs(gestureState.dx) > 6 || Math.abs(gestureState.dy) > 6,
+        onPanResponderGrant: () => {
+          taskFloatDragged.current = false;
+          taskFloatStartPosition.current = taskFloatPositionRef.current;
+          setTaskFloatDragging(true);
+          setTaskMenuOpen(false);
+          if (taskFloatCollapsed) {
+            setTaskFloatCollapsed(false);
+            setTaskFloatDock(taskFloatSide, taskFloatPositionRef.current.y, false);
+          }
+        },
+        onPanResponderMove: (_, gestureState) => {
+          if (Math.abs(gestureState.dx) > 3 || Math.abs(gestureState.dy) > 3) {
+            taskFloatDragged.current = true;
+          }
+          const nextX = Math.min(
+            taskFloatBounds.maxX,
+            Math.max(taskFloatBounds.minX, taskFloatStartPosition.current.x + gestureState.dx)
+          );
+          const nextY = Math.min(
+            taskFloatBounds.maxY,
+            Math.max(taskFloatBounds.minY, taskFloatStartPosition.current.y + gestureState.dy)
+          );
+          updateTaskFloatPosition({ x: nextX, y: nextY });
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          const releasedX = Math.min(
+            taskFloatBounds.maxX,
+            Math.max(taskFloatBounds.minX, taskFloatStartPosition.current.x + gestureState.dx)
+          );
+          const releasedY = Math.min(
+            taskFloatBounds.maxY,
+            Math.max(taskFloatBounds.minY, taskFloatStartPosition.current.y + gestureState.dy)
+          );
+          const snapX =
+            releasedX + TASK_FLOAT_WIDTH / 2 > windowWidth / 2
+              ? taskFloatBounds.maxX
+              : taskFloatBounds.minX;
+          const nextSide = snapX === taskFloatBounds.maxX ? "right" : "left";
+          setTaskFloatCollapsed(true);
+          setTaskFloatDock(nextSide, releasedY, true);
+          setTaskFloatDragging(false);
+        },
+        onPanResponderTerminate: () => {
+          setTaskFloatDragging(false);
+        }
+      }),
+    [taskFloatBounds, taskFloatCollapsed, windowWidth]
   );
 
   const totalCount = useMemo(
@@ -802,6 +940,10 @@ export default function App() {
     const timer = setInterval(() => setClockTick(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [activeTab, taskStarted]);
+
+  useEffect(() => {
+    setTaskFloatDock(taskFloatSide, taskFloatPositionRef.current.y, taskFloatCollapsed);
+  }, [taskFloatBounds, taskFloatCollapsed, taskFloatSide]);
 
   useEffect(() => {
     if (!loaded) {
@@ -915,7 +1057,7 @@ export default function App() {
         setLocationStatus("正在启动定位刷新");
         const subscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.Low,
+            accuracy: getBestNavigationAccuracy(),
             distanceInterval: 1,
             timeInterval: 1000
           },
@@ -982,9 +1124,9 @@ export default function App() {
         setLocationStatus("定位监听中");
         const subscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.High,
-            distanceInterval: 10,
-            timeInterval: 1800
+            accuracy: getBestNavigationAccuracy(),
+            distanceInterval: 2,
+            timeInterval: 1000
           },
           (position) => {
             if (cancelled) {
@@ -1140,9 +1282,6 @@ export default function App() {
     }
 
     navVisible.current = visible;
-    if (!visible) {
-      setTaskMenuOpen(false);
-    }
     setNavTouchable(visible);
     Animated.timing(navValue, {
       toValue: visible ? 1 : 0,
@@ -1168,7 +1307,6 @@ export default function App() {
   }
 
   function toggleTaskMenu() {
-    setNavVisible(true);
     setTaskMenuOpen((current) => {
       const next = !current;
       if (next && navIdleTimer.current) {
@@ -1400,16 +1538,21 @@ export default function App() {
       return false;
     }
 
+    if (Platform.OS === "android" && Location.enableNetworkProviderAsync) {
+      await Location.enableNetworkProviderAsync().catch(() => {});
+    }
+
     return true;
   }
 
   async function getLastUsablePosition(maxAge = CHECKPOINT_STALE_LOCATION_MAX_AGE_MS) {
     return Location.getLastKnownPositionAsync({
-      maxAge
+      maxAge,
+      requiredAccuracy: CHECKPOINT_WEAK_ACCURACY_METERS
     }).catch(() => null);
   }
 
-  async function getFreshPosition(timeoutMs, accuracy = Location.Accuracy.Low) {
+  async function getFreshPosition(timeoutMs, accuracy = getBestNavigationAccuracy()) {
     return withTimeout(
       Location.getCurrentPositionAsync({
         accuracy,
@@ -1422,9 +1565,13 @@ export default function App() {
 
   async function getBestEffortCurrentPosition() {
     const attempts = [
-      { label: "低精度", accuracy: Location.Accuracy.Lowest, timeout: 8000 },
-      { label: "网络定位", accuracy: Location.Accuracy.Low, timeout: 10000 },
-      { label: "均衡定位", accuracy: Location.Accuracy.Balanced, timeout: 12000 }
+      {
+        label: "导航级",
+        accuracy: getBestNavigationAccuracy(),
+        timeout: CHECKPOINT_HIGH_ACCURACY_TIMEOUT_MS
+      },
+      { label: "高精度", accuracy: Location.Accuracy.High, timeout: 14000 },
+      { label: "均衡定位", accuracy: Location.Accuracy.Balanced, timeout: CHECKPOINT_LOCATION_TIMEOUT_MS }
     ];
 
     let lastError = null;
@@ -1433,6 +1580,17 @@ export default function App() {
       setLocationDebugText(`尝试 ${attempt.label}`);
       try {
         const position = await getFreshPosition(attempt.timeout, attempt.accuracy);
+        if (
+          Number.isFinite(Number(position?.coords?.accuracy)) &&
+          Number(position.coords.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS &&
+          attempt !== attempts[attempts.length - 1]
+        ) {
+          lastError = new Error("location-accuracy-too-weak");
+          setLocationDebugText(
+            `${attempt.label}精度较弱：${formatLocationAccuracy(position.coords)}，继续尝试`
+          );
+          continue;
+        }
         return { position, label: attempt.label };
       } catch (error) {
         lastError = error;
@@ -1452,7 +1610,7 @@ export default function App() {
     }
 
     setLocationStatus("正在主动获取定位");
-    const recentPosition = await getLastUsablePosition();
+    const recentPosition = await getLastUsablePosition(CHECKPOINT_LAST_LOCATION_MAX_AGE_MS);
     if (checkpointActiveRequestId.current !== requestId) {
       return null;
     }
@@ -1523,12 +1681,14 @@ export default function App() {
     try {
       const type = checkpointDraftType.trim() || "普通考点";
       const note = checkpointDraftNote.trim();
-      const coords =
+      const cachedCoords =
         currentLocation &&
         currentLocationUpdatedAt &&
-        Date.now() - currentLocationUpdatedAt <= CHECKPOINT_STALE_LOCATION_MAX_AGE_MS
+        Date.now() - currentLocationUpdatedAt <= CHECKPOINT_LAST_LOCATION_MAX_AGE_MS &&
+        Number(currentLocation.accuracy) <= CHECKPOINT_TARGET_ACCURACY_METERS
           ? currentLocation
-          : await getCurrentPositionForCheckpoint();
+          : null;
+      const coords = cachedCoords ?? (await getCurrentPositionForCheckpoint());
       if (!coords) {
         return;
       }
@@ -4270,55 +4430,99 @@ export default function App() {
             </Animated.View>
           )}
 
+          <View
+            style={[styles.globalTaskDock, taskFloatStyle]}
+            {...taskFloatPanResponder.panHandlers}
+          >
+            {taskMenuOpen && (
+              <GlassView style={[styles.taskMenu, taskFloatMenuStyle]}>
+                <Text style={styles.taskMenuTitle} numberOfLines={1}>
+                  {taskStarted ? session.name || "未命名测试任务" : "当前无进行中任务"}
+                </Text>
+                <Text style={styles.taskMenuDesc} numberOfLines={1}>
+                  {taskStarted
+                    ? `${session.taskType === "checkpoint" ? "考点记录" : `${problemRecords.length} 条样本`} · ${session.route || "未填写路线"}`
+                    : "可以创建行车测试或考点记录任务"}
+                </Text>
+                <View style={styles.taskMenuActions}>
+                  {taskStarted ? (
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.taskMenuPrimaryButton,
+                        styles.taskMenuEndButton,
+                        pressed && styles.buttonPressed
+                      ]}
+                      onPress={() => {
+                        setTaskMenuOpen(false);
+                        endCurrentTask();
+                      }}
+                    >
+                      <Text style={styles.taskMenuPrimaryText}>结束任务</Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.taskMenuPrimaryButton,
+                        pressed && styles.buttonPressed
+                      ]}
+                      onPress={() => {
+                        setTaskMenuOpen(false);
+                        startNewSession();
+                      }}
+                    >
+                      <Text style={styles.taskMenuPrimaryText}>新任务</Text>
+                    </Pressable>
+                  )}
+                </View>
+              </GlassView>
+            )}
+            <Pressable
+              style={({ pressed }) => [
+                styles.globalTaskButton,
+                taskFloatCollapsed && styles.globalTaskButtonCollapsed,
+                taskStarted && styles.globalTaskButtonActive,
+                taskMenuOpen && styles.globalTaskButtonOpen,
+                taskFloatDragging && styles.globalTaskButtonDragging,
+                pressed && styles.buttonPressed
+              ]}
+              onPress={() => {
+                if (taskFloatDragged.current) {
+                  taskFloatDragged.current = false;
+                  return;
+                }
+                triggerHaptic();
+                if (taskFloatCollapsed) {
+                  setTaskFloatCollapsed(false);
+                  setTaskFloatDock(taskFloatSide, taskFloatPositionRef.current.y, false);
+                  return;
+                }
+                toggleTaskMenu();
+              }}
+            >
+              {taskFloatCollapsed ? (
+                <Text style={styles.globalTaskCollapsedText}>
+                  {taskFloatSide === "right" ? "‹" : "›"}
+                </Text>
+              ) : (
+                <>
+                  {taskStarted && <Animated.View style={[styles.globalTaskDot, recPulseStyle]} />}
+                  <View style={styles.globalTaskTextBlock}>
+                    <Text style={styles.globalTaskText}>
+                      {taskMenuOpen ? "收起任务" : taskStarted ? "任务中" : "新任务"}
+                    </Text>
+                    {taskStarted && (
+                      <Text style={styles.globalTaskSubText}>{taskDuration}</Text>
+                    )}
+                  </View>
+                </>
+              )}
+            </Pressable>
+          </View>
+
           <Animated.View
             pointerEvents={navTouchable ? "auto" : "none"}
             style={[styles.navBarWrap, navAnimatedStyle]}
           >
-            {(isDriveTaskStarted || activeTab === "record") && (
-              <View style={styles.bottomTaskMenuDock}>
-                {taskMenuOpen && (
-                  <GlassView style={styles.taskMenu}>
-                    <Text style={styles.taskMenuTitle} numberOfLines={1}>
-                      {taskStarted ? session.name || "未命名测试任务" : "当前无进行中任务"}
-                    </Text>
-                    <Text style={styles.taskMenuDesc} numberOfLines={1}>
-                      {taskStarted
-                        ? `${problemRecords.length} 条样本 · ${session.route || "未填写路线"}`
-                        : "可以创建行车测试或考点记录任务"}
-                    </Text>
-                    <View style={styles.taskMenuActions}>
-                      {taskStarted ? (
-                        <Pressable
-                          style={({ pressed }) => [
-                            styles.taskMenuPrimaryButton,
-                            pressed && styles.buttonPressed
-                          ]}
-                          onPress={() => {
-                            setTaskMenuOpen(false);
-                            endCurrentTask();
-                          }}
-                        >
-                          <Text style={styles.taskMenuPrimaryText}>结束任务</Text>
-                        </Pressable>
-                      ) : (
-                        <Pressable
-                          style={({ pressed }) => [
-                            styles.taskMenuPrimaryButton,
-                            pressed && styles.buttonPressed
-                          ]}
-                          onPress={() => {
-                            setTaskMenuOpen(false);
-                            startNewSession();
-                          }}
-                        >
-                          <Text style={styles.taskMenuPrimaryText}>新任务</Text>
-                        </Pressable>
-                      )}
-                    </View>
-                  </GlassView>
-                )}
-              </View>
-            )}
             <GlassView style={styles.navBar}>
               {[
                 ["record", "记录"],
@@ -4343,29 +4547,6 @@ export default function App() {
                   </Text>
                 </Pressable>
               ))}
-              {(isDriveTaskStarted || activeTab === "record") && (
-                <Pressable
-                  style={[
-                    styles.navItem,
-                    styles.navTaskItem,
-                    taskMenuOpen && styles.navItemActive,
-                    isDriveTaskStarted && styles.navTaskItemActive
-                  ]}
-                  onPress={() => {
-                    triggerHaptic();
-                    toggleTaskMenu();
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.navText,
-                      (taskMenuOpen || isDriveTaskStarted) && styles.navTextActive
-                    ]}
-                  >
-                    {taskMenuOpen ? "收起" : "任务"}
-                  </Text>
-                </Pressable>
-              )}
             </GlassView>
           </Animated.View>
         </KeyboardAvoidingView>
@@ -5686,6 +5867,70 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "900"
   },
+  globalTaskDock: {
+    alignItems: "flex-end",
+    position: "absolute",
+    zIndex: 18
+  },
+  globalTaskButton: {
+    alignItems: "center",
+    backgroundColor: "#111827",
+    borderRadius: 8,
+    elevation: 6,
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "center",
+    minHeight: 48,
+    minWidth: 92,
+    paddingHorizontal: 14,
+    shadowColor: "#111827",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16
+  },
+  globalTaskButtonCollapsed: {
+    borderRadius: 10,
+    minWidth: TASK_FLOAT_WIDTH,
+    paddingHorizontal: 0
+  },
+  globalTaskButtonActive: {
+    backgroundColor: "#0f766e",
+    shadowColor: "#0f766e"
+  },
+  globalTaskButtonOpen: {
+    backgroundColor: "#1d4ed8",
+    shadowColor: "#1d4ed8"
+  },
+  globalTaskButtonDragging: {
+    opacity: 0.9,
+    transform: [{ scale: 1.04 }]
+  },
+  globalTaskDot: {
+    backgroundColor: "#ffffff",
+    borderRadius: 4,
+    height: 8,
+    width: 8
+  },
+  globalTaskTextBlock: {
+    alignItems: "flex-start"
+  },
+  globalTaskCollapsedText: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "900",
+    lineHeight: 24
+  },
+  globalTaskText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  globalTaskSubText: {
+    color: "rgba(255,255,255,0.86)",
+    fontSize: 10,
+    fontWeight: "800",
+    marginTop: 2
+  },
   severityText: {
     fontSize: 12,
     fontWeight: "900"
@@ -5954,39 +6199,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 9
   },
-  taskFabArea: {
-    alignItems: "flex-end",
-    bottom: 76,
-    position: "absolute",
-    right: 18
-  },
-  taskFab: {
-    alignItems: "center",
-    backgroundColor: "#111827",
-    borderRadius: 8,
-    elevation: 5,
-    justifyContent: "center",
-    minHeight: 44,
-    minWidth: 64,
-    paddingHorizontal: 12,
-    shadowColor: "#111827",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14
-  },
-  taskFabText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "900"
-  },
   taskMenu: {
     marginBottom: 8,
     padding: 12,
     width: 250
-  },
-  bottomTaskMenuDock: {
-    alignItems: "flex-end",
-    marginBottom: 8
   },
   taskMenuTitle: {
     color: "#111827",
@@ -6003,16 +6219,6 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: 10
   },
-  taskMenuButton: {
-    alignItems: "center",
-    backgroundColor: "rgba(255,255,255,0.78)",
-    borderColor: "rgba(102,112,133,0.22)",
-    borderRadius: 8,
-    borderWidth: 1,
-    flex: 1,
-    justifyContent: "center",
-    minHeight: 38
-  },
   taskMenuPrimaryButton: {
     alignItems: "center",
     backgroundColor: "#1d4ed8",
@@ -6021,10 +6227,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     minHeight: 38
   },
-  taskMenuButtonText: {
-    color: "#344054",
-    fontSize: 12,
-    fontWeight: "900"
+  taskMenuEndButton: {
+    backgroundColor: "#b91c1c"
   },
   taskMenuPrimaryText: {
     color: "#ffffff",
@@ -6052,15 +6256,6 @@ const styles = StyleSheet.create({
   },
   navItemActive: {
     backgroundColor: "#111827"
-  },
-  navTaskItem: {
-    backgroundColor: "rgba(17,24,39,0.08)",
-    borderColor: "rgba(17,24,39,0.12)",
-    borderWidth: 1
-  },
-  navTaskItemActive: {
-    backgroundColor: "#0f766e",
-    borderColor: "#0f766e"
   },
   navText: {
     color: "#667085",

@@ -45,6 +45,8 @@ const TASK_FLOAT_HEIGHT = 50;
 const TASK_FLOAT_COLLAPSED_WIDTH = 32;
 const TASK_FLOAT_MARGIN = 18;
 const TASK_FLOAT_BOTTOM_OFFSET = 86;
+const TASK_MENU_WIDTH = 250;
+const TASK_MENU_ESTIMATED_HEIGHT = 116;
 
 function withTimeout(promise, timeoutMs, message) {
   return Promise.race([
@@ -758,15 +760,25 @@ export default function App() {
     [taskFloatPosition]
   );
   const taskFloatMenuStyle = useMemo(() => {
-    const menuWidth = Math.min(260, Math.max(230, windowWidth - TASK_FLOAT_MARGIN * 2));
-    const nearRightSide =
-      taskFloatPosition.x + TASK_FLOAT_WIDTH / 2 > windowWidth / 2;
-    const left = nearRightSide ? TASK_FLOAT_WIDTH - menuWidth : 0;
+    const menuWidth = Math.min(TASK_MENU_WIDTH, windowWidth - TASK_FLOAT_MARGIN * 2);
+    const preferredLeft =
+      taskFloatSide === "right"
+        ? taskFloatPosition.x + TASK_FLOAT_WIDTH - menuWidth
+        : taskFloatPosition.x;
+    const left = Math.min(
+      windowWidth - menuWidth - TASK_FLOAT_MARGIN,
+      Math.max(TASK_FLOAT_MARGIN, preferredLeft)
+    );
+    const top = Math.max(
+      TASK_FLOAT_MARGIN,
+      taskFloatPosition.y - TASK_MENU_ESTIMATED_HEIGHT - 8
+    );
     return {
       left,
+      top,
       width: menuWidth
     };
-  }, [taskFloatPosition.x, windowWidth]);
+  }, [taskFloatPosition.x, taskFloatPosition.y, taskFloatSide, windowWidth]);
 
   function updateTaskFloatPosition(nextPosition) {
     taskFloatPositionRef.current = nextPosition;
@@ -4430,12 +4442,8 @@ export default function App() {
             </Animated.View>
           )}
 
-          <View
-            style={[styles.globalTaskDock, taskFloatStyle]}
-            {...taskFloatPanResponder.panHandlers}
-          >
-            {taskMenuOpen && (
-              <GlassView style={[styles.taskMenu, taskFloatMenuStyle]}>
+          {taskMenuOpen && (
+            <GlassView style={[styles.taskMenu, taskFloatMenuStyle]}>
                 <Text style={styles.taskMenuTitle} numberOfLines={1}>
                   {taskStarted ? session.name || "未命名测试任务" : "当前无进行中任务"}
                 </Text>
@@ -4476,6 +4484,10 @@ export default function App() {
                 </View>
               </GlassView>
             )}
+          <View
+            style={[styles.globalTaskDock, taskFloatStyle]}
+            {...taskFloatPanResponder.panHandlers}
+          >
             <Pressable
               style={({ pressed }) => [
                 styles.globalTaskButton,
@@ -6200,8 +6212,9 @@ const styles = StyleSheet.create({
     marginTop: 9
   },
   taskMenu: {
-    marginBottom: 8,
     padding: 12,
+    position: "absolute",
+    zIndex: 17,
     width: 250
   },
   taskMenuTitle: {

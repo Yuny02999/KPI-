@@ -1,4 +1,4 @@
-﻿
+
 ## v1.0.1 / code 2
 
 - File: v1.0.1-code2-release-autodrive-metrics.apk
@@ -44,3 +44,19 @@
 - Created: 2026-05-06 16:25:50
 - SHA256: 015540DA6B2A8B56BE27F7CBC083918E984C0549E59A629A650523A9BF67C2E0
 
+## 高德定位实验版（不建议使用）
+
+以下版本为高德定位 demo 尝试版，现场效果不理想，已从主线移除，仅保留文件用于区分和回溯：
+
+- AMAP_EXPERIMENTAL_DO_NOT_USE_v1.0.8-code9-release-autodrive-metrics.apk
+- AMAP_EXPERIMENTAL_DO_NOT_USE_v1.0.9-code10-release-autodrive-metrics.apk
+- AMAP_EXPERIMENTAL_DO_NOT_USE_v1.0.10-code11-release-autodrive-metrics.apk
+
+当前推荐使用稳定版：v1.0.7-code8-release-autodrive-metrics.apk
+
+## v1.0.11 / code 12
+
+- File: v1.0.11-code12-release-autodrive-metrics.apk
+- Type: Release APK, supports overwrite install
+- Created: 2026-05-11 15:18:23
+- SHA256: F651845F154ACB6BDA2BE3E268107FC933C6FECF30771E63C7BD31E956F116D6

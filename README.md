@@ -1,6 +1,6 @@
 # 计数助手
 
-一个适用于 iOS 和 Android 的 Expo/React Native 计数 App。
+一个面向 Android 的 React Native 计数 App。
 
 ## 功能
 
@@ -51,55 +51,37 @@ Content-Type: application/json
 
 注意：当前 App 通过 Supabase REST API 依次写入 `test_reports` 和 `test_events`。如果网络在第二步中断，云端可能已保存报告主表但缺少部分事件；App 会在本机数据页标记同步失败并保留完整本地数据，可重试同步。
 
-## 运行
+## Android 构建与测试
 
-先安装依赖：
+安装 Node.js 20.19.4 或更新版本、JDK 17 和 Android Studio。通过 SDK Manager 安装 Android SDK 36、Build Tools 35.0.0 和 36.0.0、NDK 27.1.12297006、CMake 3.22.1 和 Platform Tools。已有项目本地工具时可直接使用。首次构建需要从 npm 和 Maven 下载依赖。
 
-```bash
-npm install
+```powershell
+. .\use-local-env.ps1
+npm.cmd ci
+.\build-android-apk.bat
 ```
 
-Expo SDK 54 需要 Node.js 20.19.x 或更高版本。Windows PowerShell 如果拦截 `npm.ps1`，可以改用 `npm.cmd install` 和 `npm.cmd start`。
+测试 APK 位于 `android/app/build/outputs/apk/release/app-release.apk`，内含 JavaScript，可离线启动。Windows 打包脚本会为含中文的项目路径临时映射盘符。使用 Android Studio 调试时，从只含 ASCII 字符的路径打开 `android` 目录，并先运行 `npm.cmd start`。
 
-启动开发服务：
+启用手机的 USB 调试后运行：
 
-```bash
-npm start
+```powershell
+adb devices
+.\build-android-apk.bat -Install
 ```
 
-然后可以用 Expo Go 扫码预览，或运行：
+测试 APK 使用本地调试密钥。覆盖旧版需要相同签名。如签名不同，先导出所需历史记录，卸载会清除本机应用数据。使用 x86_64 模拟器时，用 `.\build-android-apk.bat -Architecture x86_64 -Install` 构建并安装。如果项目内已有 `apk_counter_test`，加载本地环境后可用 `emulator -avd apk_counter_test` 启动。
 
-```bash
-npm run android
-npm run ios
+在「考点」页测试精确和大致位置权限、拒绝授权、系统定位关闭、首次获取坐标和保存考点。用模拟器移动位置验证经过考点触发和结束测试后停止监听，最后用真机核对 GPS 精度与超时回退。
+
+## 发布版本
+
+Git 上传目标为 [Yuny02999/KPI-](https://github.com/Yuny02999/KPI-)（`https://github.com/Yuny02999/KPI-.git`）。
+
+[Android Release 列表](APK_versions/VERSION_NOTES.md)是版本记录和安装包索引。正式归档前，在 `android/app/build.gradle` 中提高 `versionName` 和 `versionCode`。小范围向后兼容修复通常只增加补丁版本。准备一份 UTF-8 Markdown 说明，按功能、修复、优化或实验写明实际变化，再补充验证情况。只需填写本版涉及的分类。
+
+```powershell
+.\build-android-apk.bat -Architecture arm64-v8a,x86_64 -ReleaseNotes .\release-notes.md
 ```
 
-`npm run ios` 需要 macOS 和 Xcode 环境。
-
-## 打包
-
-Windows 上可以直接运行：
-
-```bash
-build-android-apk.bat
-```
-
-它会安装/调用 EAS CLI，登录 Expo 后生成 Android APK 下载链接。
-
-如果 EAS 上传失败，也可以本地生成调试 APK：
-
-```bash
-build-android-local-debug.bat
-```
-
-输出文件在 `android/app/build/outputs/apk/debug/app-debug.apk`。
-
-也可以手动使用 EAS Build：
-
-```bash
-npx eas build --platform android --profile preview
-npx eas build --platform ios --profile production
-```
-
-Android 的 `preview` 配置会生成可直接安装的 APK。`production` 配置会生成用于应用商店的 AAB。
-iOS 打包需要 Apple Developer 账号。
+归档完成后，脚本把带版本号、构建号和架构的 APK 写入 `APK_versions`，并更新列表和 SHA-256。分发时从 Release 列表取包。普通本地打包仍输出到 `android/app/build/outputs/apk/release`，便于临时验证。

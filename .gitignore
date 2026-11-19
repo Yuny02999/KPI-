@@ -1,10 +1,12 @@
 node_modules/
-.expo/
+.devtools/
+.npm-cache/
 .android-sdk/
 .gradle-home/
 .jdk17/
 dist/
 build/
+android/local.properties
 android/.gradle/
 android/build/
 android/app/build/

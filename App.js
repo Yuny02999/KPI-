@@ -1,10 +1,5 @@
+import * as Location from "./androidLocation";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { BlurView } from "expo-blur";
-import * as FileSystem from "expo-file-system/legacy";
-import * as Haptics from "expo-haptics";
-import * as Location from "expo-location";
-import * as Sharing from "expo-sharing";
-import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
@@ -13,11 +8,13 @@ import {
   LayoutAnimation,
   Linking,
   Modal,
+  NativeModules,
   PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  StatusBar,
   Switch,
   Text,
   TextInput,
@@ -28,11 +25,6 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 const STORAGE_KEY = "counter-mobile-app:v3";
 const LEGACY_STORAGE_KEY = "counter-mobile-app:v2";
-const blurProps = {
-  intensity: 72,
-  tint: "light",
-  experimentalBlurMethod: "dimezisBlurView"
-};
 const CHECKPOINT_LOCATION_TIMEOUT_MS = 12000;
 const CHECKPOINT_HIGH_ACCURACY_TIMEOUT_MS = 18000;
 const CHECKPOINT_LAST_LOCATION_MAX_AGE_MS = 15000;
@@ -48,13 +40,9 @@ const TASK_FLOAT_BOTTOM_OFFSET = 86;
 const TASK_MENU_WIDTH = 250;
 const TASK_MENU_ESTIMATED_HEIGHT = 116;
 
-function withTimeout(promise, timeoutMs, message) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(message)), timeoutMs);
-    })
-  ]);
+function isRecentCheckpointFix(timestamp) {
+  const age = Date.now() - timestamp;
+  return Number.isFinite(timestamp) && age >= 0 && age <= CHECKPOINT_LAST_LOCATION_MAX_AGE_MS;
 }
 
 const metricGroups = [
@@ -77,6 +65,18 @@ const metricGroups = [
     title: "绕行性能指标",
     color: "#18aa98",
     metrics: ["绕行", "小路/窄路动态交互通行"]
+  }
+];
+
+const metricTemplates = [
+  {
+    id: "default",
+    name: "默认模板",
+    description: "补齐场景、路口、变道、体感、绕行等主线指标",
+    groups: metricGroups.map((group) => ({
+      categoryId: group.id,
+      metrics: group.metrics
+    }))
   }
 ];
 
@@ -411,14 +411,6 @@ function getCheckpointLocationQuality(coords, updatedAt, status) {
   };
 }
 
-function getBestNavigationAccuracy() {
-  return (
-    Location.Accuracy.BestForNavigation ??
-    Location.Accuracy.Highest ??
-    Location.Accuracy.High
-  );
-}
-
 function getCheckpointPerformanceOption(id) {
   return (
     checkpointPerformanceOptions.find((option) => option.id === id) ??
@@ -609,9 +601,9 @@ function sanitizeFileNamePart(value, fallback) {
 
 function GlassView({ children, style }) {
   return (
-    <BlurView {...blurProps} style={[styles.glass, style]}>
+    <View style={[styles.glass, style]}>
       {children}
-    </BlurView>
+    </View>
   );
 }
 
@@ -662,6 +654,9 @@ export default function App() {
   const [eventModalMetric, setEventModalMetric] = useState(null);
   const [eventSeverity, setEventSeverity] = useState("normal");
   const [eventNote, setEventNote] = useState("");
+  const [templateModalVisible, setTemplateModalVisible] = useState(false);
+  const [templateDraftText, setTemplateDraftText] = useState("");
+  const [templateDraftGroupId, setTemplateDraftGroupId] = useState(metricGroups[0].id);
   const [problemRecords, setProblemRecords] = useState([]);
   const [problemText, setProblemText] = useState("");
   const [problemSelectedTagIds, setProblemSelectedTagIds] = useState([]);
@@ -714,8 +709,7 @@ export default function App() {
   const navVisible = useRef(true);
   const navIdleTimer = useRef(null);
   const statusIdleTimer = useRef(null);
-  const locationSubscription = useRef(null);
-  const checkpointPreviewSubscription = useRef(null);
+  const checkpointLocationHandler = useRef(null);
   const checkpointAlertedIds = useRef(new Set());
   const currentLocationRef = useRef(null);
   const checkpointActiveRequestId = useRef(0);
@@ -1046,20 +1040,19 @@ export default function App() {
   }, [checkpointRecords, routeCheckpoints, session.startedAt]);
 
   useEffect(() => {
-    if (!checkpointPreviewActive) {
-      if (checkpointPreviewSubscription.current) {
-        checkpointPreviewSubscription.current.remove();
-        checkpointPreviewSubscription.current = null;
-      }
-      return undefined;
-    }
+    checkpointLocationHandler.current = handleLocationUpdate;
+  });
 
+  useEffect(() => {
+    if (!checkpointPreviewActive) return undefined;
+
+    let subscription;
     let cancelled = false;
     async function startCheckpointPreview() {
       try {
         setLocationStatus("正在检查定位权限");
         const ready = await ensureLocationReady();
-        if (!ready) {
+        if (!ready || cancelled) {
           return;
         }
 
@@ -1067,21 +1060,14 @@ export default function App() {
         requestCheckpointLocation();
 
         setLocationStatus("正在启动定位刷新");
-        const subscription = await Location.watchPositionAsync(
+        subscription = await Location.watchPositionAsync(
           {
-            accuracy: getBestNavigationAccuracy(),
-            distanceInterval: 1,
+            distanceInterval: 0,
             timeInterval: 1000
           },
           (position) => {
             if (!cancelled) {
-              updateCurrentLocation(position.coords, "定位已更新");
-            }
-          },
-          (error) => {
-            if (!cancelled) {
-              setLocationStatus("定位刷新失败");
-              setLocationDebugText(String(error?.message ?? error).slice(0, 80));
+              updateCurrentLocation(position.coords, "定位已更新", position.timestamp);
             }
           }
         );
@@ -1089,41 +1075,35 @@ export default function App() {
           subscription.remove();
           return;
         }
-        checkpointPreviewSubscription.current = subscription;
         if (!currentLocationRef.current) {
           setLocationStatus("正在主动获取定位");
         }
       } catch (error) {
-        setLocationStatus(`定位启动失败：${String(error?.message ?? error).slice(0, 24)}`);
+        if (!cancelled) {
+          setLocationStatus(`定位启动失败：${String(error?.message ?? error).slice(0, 24)}`);
+        }
       }
     }
 
     startCheckpointPreview();
     return () => {
       cancelled = true;
-      if (checkpointPreviewSubscription.current) {
-        checkpointPreviewSubscription.current.remove();
-        checkpointPreviewSubscription.current = null;
-      }
+      subscription?.remove();
     };
   }, [checkpointPreviewActive]);
 
   useEffect(() => {
     if (!checkpointMonitorActive) {
-      if (locationSubscription.current) {
-        locationSubscription.current.remove();
-        locationSubscription.current = null;
-      }
-      if (!checkpointPreviewActive) {
-        setLocationStatus("未开始测试");
-      }
+      if (!checkpointPreviewActive) setLocationStatus("未开始测试");
       return undefined;
     }
 
+    let subscription;
     let cancelled = false;
     async function startLocationWatch() {
       try {
         const permission = await Location.requestForegroundPermissionsAsync();
+        if (cancelled) return;
         if (permission.status !== "granted") {
           setLocationStatus("定位权限未开启");
           showDialog({
@@ -1134,9 +1114,8 @@ export default function App() {
         }
 
         setLocationStatus("定位监听中");
-        const subscription = await Location.watchPositionAsync(
+        subscription = await Location.watchPositionAsync(
           {
-            accuracy: getBestNavigationAccuracy(),
             distanceInterval: 2,
             timeInterval: 1000
           },
@@ -1144,15 +1123,15 @@ export default function App() {
             if (cancelled) {
               return;
             }
-            handleLocationUpdate(position.coords);
+            checkpointLocationHandler.current?.(position.coords, position.timestamp);
           }
         );
         if (cancelled) {
           subscription.remove();
           return;
         }
-        locationSubscription.current = subscription;
       } catch (error) {
+        if (cancelled) return;
         setLocationStatus("定位启动失败");
         showDialog({
           title: "定位启动失败",
@@ -1164,19 +1143,9 @@ export default function App() {
     startLocationWatch();
     return () => {
       cancelled = true;
-      if (locationSubscription.current) {
-        locationSubscription.current.remove();
-        locationSubscription.current = null;
-      }
+      subscription?.remove();
     };
-  }, [
-    checkpointMonitorActive,
-    routeCheckpoints,
-    checkpointRadiusValue,
-    session.startedAt,
-    pendingCheckpoint,
-    checkpointCursorIndex
-  ]);
+  }, [checkpointMonitorActive, checkpointPreviewActive]);
 
   const recPulseStyle = {
     opacity: pulseValue.interpolate({
@@ -1467,27 +1436,17 @@ export default function App() {
     supabaseUrl
   ]);
 
-  async function triggerHaptic() {
-    if (!hapticsEnabled) {
-      return;
-    }
-
-    try {
-      if (Platform.OS === "android") {
-        await Haptics.performAndroidHapticsAsync(Haptics.AndroidHaptics.Segment_Tick);
-        return;
-      }
-
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    } catch (error) {
-      // Haptics can be unavailable on some devices or emulator settings.
-    }
+  function triggerHaptic() {
+    if (hapticsEnabled) NativeModules.RecorderNative.haptic();
   }
 
-  function updateCurrentLocation(coords, status = "已获取当前位置") {
-    currentLocationRef.current = coords;
+  function updateCurrentLocation(coords, status, timestamp) {
+    if (!isRecentCheckpointFix(timestamp) || timestamp < (currentLocationRef.current?.timestamp ?? 0)) {
+      return;
+    }
+    currentLocationRef.current = { coords, timestamp };
     setCurrentLocation(coords);
-    setCurrentLocationUpdatedAt(Date.now());
+    setCurrentLocationUpdatedAt(timestamp);
     setLocationStatus(status);
     setLocationDebugText(
       `坐标 ${formatCoordinate(coords?.latitude)}, ${formatCoordinate(coords?.longitude)} · ${formatLocationAccuracy(coords)}`
@@ -1550,10 +1509,6 @@ export default function App() {
       return false;
     }
 
-    if (Platform.OS === "android" && Location.enableNetworkProviderAsync) {
-      await Location.enableNetworkProviderAsync().catch(() => {});
-    }
-
     return true;
   }
 
@@ -1564,22 +1519,23 @@ export default function App() {
     }).catch(() => null);
   }
 
-  async function getFreshPosition(timeoutMs, accuracy = getBestNavigationAccuracy()) {
-    return withTimeout(
-      Location.getCurrentPositionAsync({
-        accuracy,
-        mayShowUserSettingsDialog: true
-      }),
-      timeoutMs,
-      "checkpoint-location-timeout"
-    );
+  function getFreshPosition(timeout, accuracy) {
+    return Location.getCurrentPositionAsync({
+      accuracy,
+      timeout,
+      maxAge: CHECKPOINT_LAST_LOCATION_MAX_AGE_MS,
+      targetAccuracy:
+        accuracy === Location.Accuracy.BestForNavigation
+          ? CHECKPOINT_TARGET_ACCURACY_METERS
+          : CHECKPOINT_WEAK_ACCURACY_METERS
+    });
   }
 
-  async function getBestEffortCurrentPosition() {
+  async function getBestEffortCurrentPosition(requestId) {
     const attempts = [
       {
         label: "导航级",
-        accuracy: getBestNavigationAccuracy(),
+        accuracy: Location.Accuracy.BestForNavigation,
         timeout: CHECKPOINT_HIGH_ACCURACY_TIMEOUT_MS
       },
       { label: "高精度", accuracy: Location.Accuracy.High, timeout: 14000 },
@@ -1587,35 +1543,34 @@ export default function App() {
     ];
 
     let lastError = null;
+    let best = null;
     for (const attempt of attempts) {
+      if (checkpointActiveRequestId.current !== requestId) throw new Error("location-superseded");
       setLocationStatus(`正在主动获取定位-${attempt.label}`);
       setLocationDebugText(`尝试 ${attempt.label}`);
       try {
         const position = await getFreshPosition(attempt.timeout, attempt.accuracy);
-        if (
-          Number.isFinite(Number(position?.coords?.accuracy)) &&
-          Number(position.coords.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS &&
-          attempt !== attempts[attempts.length - 1]
-        ) {
-          lastError = new Error("location-accuracy-too-weak");
-          setLocationDebugText(
-            `${attempt.label}精度较弱：${formatLocationAccuracy(position.coords)}，继续尝试`
-          );
-          continue;
+        if (checkpointActiveRequestId.current !== requestId) return null;
+        if (!isRecentCheckpointFix(position?.timestamp)) continue;
+        if (!isRecentCheckpointFix(best?.position.timestamp) || position.coords.accuracy < best.position.coords.accuracy) {
+          best = { position, label: attempt.label };
         }
-        return { position, label: attempt.label };
+        if (position.coords.accuracy <= CHECKPOINT_WEAK_ACCURACY_METERS) return best;
       } catch (error) {
+        if (checkpointActiveRequestId.current !== requestId) return null;
         lastError = error;
         setLocationDebugText(`${attempt.label}失败：${String(error?.message ?? error).slice(0, 36)}`);
       }
     }
 
+    if (isRecentCheckpointFix(best?.position.timestamp)) return best;
     throw lastError ?? new Error("location-unavailable");
   }
 
   async function requestCheckpointLocation({ showErrors = false } = {}) {
     const requestId = checkpointActiveRequestId.current + 1;
     checkpointActiveRequestId.current = requestId;
+    Location.cancelCurrentPosition();
     const ready = await ensureLocationReady({ showErrors });
     if (!ready || checkpointActiveRequestId.current !== requestId) {
       return null;
@@ -1627,27 +1582,33 @@ export default function App() {
       return null;
     }
     if (recentPosition?.coords) {
-      updateCurrentLocation(recentPosition.coords, "已获取最近定位");
+      updateCurrentLocation(recentPosition.coords, "已获取最近定位", recentPosition.timestamp);
     }
 
     try {
-      const { position, label } = await getBestEffortCurrentPosition();
+      const result = await getBestEffortCurrentPosition(requestId);
       if (checkpointActiveRequestId.current !== requestId) {
         return null;
       }
-      updateCurrentLocation(position.coords, `主动定位成功-${label}`);
-      return position.coords;
+      if (!result) return null;
+      const { position, label } = result;
+      updateCurrentLocation(position.coords, `主动定位成功-${label}`, position.timestamp);
+      return position;
     } catch (error) {
-      if (recentPosition?.coords) {
-        setLocationStatus("使用最近定位");
-        return recentPosition.coords;
+      if (checkpointActiveRequestId.current !== requestId) return null;
+      const fallback = await getLastUsablePosition(CHECKPOINT_LAST_LOCATION_MAX_AGE_MS);
+      if (checkpointActiveRequestId.current !== requestId) return null;
+      if (isRecentCheckpointFix(fallback?.timestamp)) {
+        updateCurrentLocation(fallback.coords, "使用最近定位", fallback.timestamp);
+        return fallback;
       }
       setLocationStatus("主动定位失败");
       await readProviderStatus();
+      if (checkpointActiveRequestId.current !== requestId) return null;
       if (showErrors) {
         showDialog({
           title: "主动定位失败",
-          message: "没有获取到当前位置。请确认系统定位、精确位置、Expo Go 定位权限已开启，并先打开地图 App 看是否能定位。"
+          message: "没有获取到当前位置。请确认系统定位、精确位置、本应用定位权限已开启，并先打开地图 App 看是否能定位。"
         });
       }
       return null;
@@ -1666,17 +1627,13 @@ export default function App() {
       `最近定位：${lastPosition?.coords ? `${formatCoordinate(lastPosition.coords.latitude)}, ${formatCoordinate(lastPosition.coords.longitude)} · ${formatLocationAccuracy(lastPosition.coords)}` : "无"}`
     ];
     setLocationDebugText(parts.join("；"));
-    const coords = await requestCheckpointLocation({ showErrors: true });
+    const coords = (await requestCheckpointLocation({ showErrors: true }))?.coords;
     if (coords) {
       showDialog({
         title: "定位诊断通过",
         message: `已获取坐标：${formatCoordinate(coords.latitude)}, ${formatCoordinate(coords.longitude)} · ${formatLocationAccuracy(coords)}`
       });
     }
-  }
-
-  async function getCurrentPositionForCheckpoint() {
-    return requestCheckpointLocation({ showErrors: true });
   }
 
   async function addRouteCheckpoint() {
@@ -1693,17 +1650,20 @@ export default function App() {
     try {
       const type = checkpointDraftType.trim() || "普通考点";
       const note = checkpointDraftNote.trim();
-      const cachedCoords =
-        currentLocation &&
-        currentLocationUpdatedAt &&
-        Date.now() - currentLocationUpdatedAt <= CHECKPOINT_LAST_LOCATION_MAX_AGE_MS &&
-        Number(currentLocation.accuracy) <= CHECKPOINT_TARGET_ACCURACY_METERS
-          ? currentLocation
-          : null;
-      const coords = cachedCoords ?? (await getCurrentPositionForCheckpoint());
-      if (!coords) {
-        return;
-      }
+      const cached = currentLocationRef.current;
+      const position =
+        isRecentCheckpointFix(cached?.timestamp) && cached.coords.accuracy <= CHECKPOINT_TARGET_ACCURACY_METERS
+          ? cached
+          : await requestCheckpointLocation({ showErrors: true });
+      if (!position) return;
+      const { coords } = position;
+      const saveIfFresh = () => {
+        if (!isRecentCheckpointFix(position.timestamp)) {
+          showDialog({ title: "定位已过期", message: "请重新定位后再保存考点。" });
+          return;
+        }
+        saveRouteCheckpoint(name, coords, type, note);
+      };
       if (Number(coords.accuracy) > CHECKPOINT_WEAK_ACCURACY_METERS) {
         showDialog({
           title: "当前定位精度较弱",
@@ -1713,21 +1673,18 @@ export default function App() {
             {
               text: "仍然保存",
               variant: "primary",
-              onPress: () => saveRouteCheckpoint(name, coords, type, note)
+              onPress: saveIfFresh
             }
           ]
         });
         return;
       }
-      saveRouteCheckpoint(name, coords, type, note);
+      saveIfFresh();
     } catch (error) {
       setLocationStatus("定位失败");
       showDialog({
-        title: error?.message === "checkpoint-location-timeout" ? "定位超时" : "打点失败",
-        message:
-          error?.message === "checkpoint-location-timeout"
-            ? "本次没有在 9 秒内获取到定位。请确认 GPS 已开启，或走到空旷位置后再试。"
-            : "没有获取到当前位置，请确认 GPS 已开启并在空旷位置重试。"
+        title: "打点失败",
+        message: "没有获取到当前位置，请确认系统定位已开启并在空旷位置重试。"
       });
     } finally {
       setCheckpointLocating(false);
@@ -2038,8 +1995,8 @@ export default function App() {
     setCheckpointCursorIndex(findNextCheckpointIndex(fromIndex + 1));
   }
 
-  function handleLocationUpdate(coords) {
-    updateCurrentLocation(coords, "定位监听中");
+  function handleLocationUpdate(coords, timestamp) {
+    updateCurrentLocation(coords, "定位监听中", timestamp);
     if (!checkpointListeningEnabled || !taskStarted || pendingCheckpoint || routeCheckpoints.length === 0) {
       return;
     }
@@ -2053,6 +2010,15 @@ export default function App() {
     if (!checkpoint) {
       return;
     }
+
+    const savedAccuracy = Number(checkpoint.accuracy);
+    const accuracy = Math.hypot(coords.accuracy, savedAccuracy > 0 ? savedAccuracy : 0);
+    if (
+      !isRecentCheckpointFix(timestamp) ||
+      !coords.precise ||
+      !(coords.accuracy > 0) ||
+      accuracy > Math.min(checkpointRadiusValue, CHECKPOINT_WEAK_ACCURACY_METERS)
+    ) return;
 
     const distance = calculateDistanceMeters(coords, checkpoint);
     if (distance === null || distance > checkpointRadiusValue) {
@@ -2445,22 +2411,8 @@ export default function App() {
       session.vehicle,
       "未填写车辆"
     )}+${sanitizeFileNamePart(session.route, "未填写路线")}+${testDate}.txt`;
-    const uri = `${FileSystem.documentDirectory}${fileName}`;
-
     try {
-      await FileSystem.writeAsStringAsync(uri, lines.join("\n"), {
-        encoding: FileSystem.EncodingType.UTF8
-      });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, {
-          mimeType: "text/plain",
-          dialogTitle: "导出指标计算结果",
-          UTI: "public.plain-text"
-        });
-      } else {
-        showDialog({ title: "导出完成", message: `文件已保存到：${uri}` });
-      }
+      await NativeModules.RecorderNative.exportFile(fileName, lines.join("\n"), "text/plain", "导出指标计算结果");
     } catch (error) {
       showDialog({ title: "导出失败", message: "请检查文件权限后重试。" });
     }
@@ -2542,6 +2494,139 @@ export default function App() {
       ];
     });
     setDraftName("");
+  }
+
+  function splitTemplateText(value) {
+    return String(value ?? "")
+      .split(/[\n,，;；、]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function insertMetricsIntoGroup(current, group, names) {
+    const existingNames = new Set(current.map((metric) => normalizeMetricName(metric.name)));
+    const uniqueNames = [];
+
+    names.forEach((name) => {
+      const normalizedName = normalizeMetricName(name);
+      if (!normalizedName || existingNames.has(normalizedName)) {
+        return;
+      }
+      existingNames.add(normalizedName);
+      uniqueNames.push(name);
+    });
+
+    if (uniqueNames.length === 0) {
+      return { next: current, added: 0, skipped: names.length };
+    }
+
+    const createdAt = now();
+    const additions = uniqueNames.map((name, index) => ({
+      id: createId("template"),
+      categoryId: group.id,
+      categoryName: group.title,
+      color: group.color,
+      name,
+      count: 0,
+      createdAt,
+      updatedAt: createdAt,
+      templateOrder: index
+    }));
+    const insertIndex = current.reduce(
+      (lastIndex, item, index) =>
+        item.categoryId === group.id ? index + 1 : lastIndex,
+      current.length
+    );
+
+    return {
+      next: [
+        ...current.slice(0, insertIndex),
+        ...additions.map(({ templateOrder, ...metric }) => metric),
+        ...current.slice(insertIndex)
+      ],
+      added: additions.length,
+      skipped: names.length - additions.length
+    };
+  }
+
+  function applyMetricTemplate(template) {
+    triggerHaptic();
+    const existingNames = new Set(metrics.map((metric) => normalizeMetricName(metric.name)));
+    const templateNames = template.groups.flatMap((group) => group.metrics);
+    const uniqueTemplateNames = [];
+    templateNames.forEach((name) => {
+      const normalizedName = normalizeMetricName(name);
+      if (!normalizedName || existingNames.has(normalizedName)) {
+        return;
+      }
+      existingNames.add(normalizedName);
+      uniqueTemplateNames.push(name);
+    });
+    const added = uniqueTemplateNames.length;
+    const skipped = templateNames.length - added;
+
+    setMetrics((current) => {
+      let next = current;
+      template.groups.forEach((templateGroup) => {
+        const group =
+          metricGroups.find((item) => item.id === templateGroup.categoryId) ??
+          metricGroups[0];
+        const result = insertMetricsIntoGroup(next, group, templateGroup.metrics);
+        next = result.next;
+      });
+      return next;
+    });
+
+    setTemplateModalVisible(false);
+    showDialog({
+      title: "模板已应用",
+      message:
+        added > 0
+          ? `已新增 ${added} 个指标，跳过 ${skipped} 个已存在指标。`
+          : "默认模板中的指标已全部存在，无需重复新增。"
+    });
+  }
+
+  function addCustomTemplateMetrics() {
+    triggerHaptic();
+    const names = splitTemplateText(templateDraftText);
+    if (names.length === 0) {
+      showDialog({
+        title: "模板内容为空",
+        message: "请至少填写一个指标名称。多个指标可以换行或用顿号、逗号分隔。"
+      });
+      return;
+    }
+
+    const group =
+      metricGroups.find((item) => item.id === templateDraftGroupId) ?? selectedGroup;
+    const existingNames = new Set(metrics.map((metric) => normalizeMetricName(metric.name)));
+    const uniqueNames = names.filter((name) => {
+      const normalizedName = normalizeMetricName(name);
+      if (!normalizedName || existingNames.has(normalizedName)) {
+        return false;
+      }
+      existingNames.add(normalizedName);
+      return true;
+    });
+    const added = uniqueNames.length;
+    const skipped = names.length - added;
+
+    setMetrics((current) => {
+      const result = insertMetricsIntoGroup(current, group, names);
+      return result.next;
+    });
+
+    setSelectedGroupId(group.id);
+    setTemplateDraftText("");
+    setTemplateModalVisible(false);
+    showDialog({
+      title: "模板内容已新增",
+      message:
+        added > 0
+          ? `已加入 ${added} 个${group.title.replace("性能指标", "")}指标，跳过 ${skipped} 个重复项。`
+          : "这些指标已经存在，没有重复新增。"
+    });
   }
 
   function resetAllMetrics() {
@@ -3172,22 +3257,8 @@ export default function App() {
     const fileName = `autodrive-report-${new Date()
       .toISOString()
       .replace(/[:.]/g, "-")}.html`;
-    const uri = `${FileSystem.documentDirectory}${fileName}`;
-
     try {
-      await FileSystem.writeAsStringAsync(uri, documentHtml, {
-        encoding: FileSystem.EncodingType.UTF8
-      });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, {
-          mimeType: "text/html",
-          dialogTitle: "导出性能指标报告",
-          UTI: "public.html"
-        });
-      } else {
-        showDialog({ title: "导出完成", message: `文件已保存到：${uri}` });
-      }
+      await NativeModules.RecorderNative.exportFile(fileName, documentHtml, "text/html", "导出性能指标报告");
     } catch (error) {
       showDialog({ title: "导出失败", message: "请检查文件权限后重试。" });
     }
@@ -3319,7 +3390,7 @@ export default function App() {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.backgroundTop} />
         <View style={styles.backgroundBottom} />
-        <StatusBar style="dark" />
+        <StatusBar barStyle="dark-content" />
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
           style={styles.screen}
@@ -3396,6 +3467,19 @@ export default function App() {
                   onPress={undo}
                 >
                   <Text style={styles.toolButtonText}>撤回</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.toolButton,
+                    pressed && styles.buttonPressed
+                  ]}
+                  onPress={() => {
+                    triggerHaptic();
+                    setTemplateDraftGroupId(selectedGroupId);
+                    setTemplateModalVisible(true);
+                  }}
+                >
+                  <Text style={styles.toolButtonText}>模板</Text>
                 </Pressable>
                 <Pressable
                   style={({ pressed }) => [
@@ -4331,7 +4415,7 @@ export default function App() {
                   onValueChange={(value) => {
                     setHapticsEnabled(value);
                     if (value) {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                      NativeModules.RecorderNative.haptic();
                     }
                   }}
                   trackColor={{ false: "#d0d5dd", true: "#bfdbfe" }}
@@ -4635,6 +4719,106 @@ export default function App() {
                 <Text style={styles.modalDeleteText}>删除指标</Text>
               </Pressable>
             </GlassView>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal transparent visible={templateModalVisible} animationType="fade">
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setTemplateModalVisible(false)}
+          >
+            <Pressable onPress={(event) => event.stopPropagation()}>
+              <GlassView style={styles.modalCard}>
+                <Text style={styles.modalTitle}>指标模板</Text>
+                <Text style={styles.modalSubtitle}>
+                  使用默认模板补齐主线指标，也可以批量新增自定义模板内容
+                </Text>
+
+                <View style={styles.templateList}>
+                  {metricTemplates.map((template) => (
+                    <Pressable
+                      key={template.id}
+                      style={({ pressed }) => [
+                        styles.templateCard,
+                        pressed && styles.buttonPressed
+                      ]}
+                      onPress={() => applyMetricTemplate(template)}
+                    >
+                      <View style={styles.templateCardText}>
+                        <Text style={styles.templateTitle}>{template.name}</Text>
+                        <Text style={styles.templateDescription}>
+                          {template.description}
+                        </Text>
+                      </View>
+                      <Text style={styles.templateCount}>
+                        {template.groups.reduce(
+                          (sum, group) => sum + group.metrics.length,
+                          0
+                        )}
+                        项
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={styles.problemLabel}>自定义模板内容</Text>
+                <TextInput
+                  value={templateDraftText}
+                  onChangeText={setTemplateDraftText}
+                  placeholder={"每行一个指标，例如：\n红绿灯识别迟滞\n匝道汇入犹豫"}
+                  placeholderTextColor="#7c8790"
+                  style={[styles.input, styles.templateInput]}
+                  multiline
+                  textAlignVertical="top"
+                />
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.groupChips}
+                >
+                  {metricGroups.map((group) => {
+                    const selected = group.id === templateDraftGroupId;
+                    return (
+                      <Pressable
+                        key={group.id}
+                        style={[
+                          styles.groupChip,
+                          selected && { backgroundColor: group.color }
+                        ]}
+                        onPress={() => {
+                          triggerHaptic();
+                          setTemplateDraftGroupId(group.id);
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.groupChipText,
+                            selected && styles.groupChipTextActive
+                          ]}
+                        >
+                          {group.title.replace("性能指标", "")}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+
+                <View style={styles.modalActions}>
+                  <Pressable
+                    style={styles.modalGhostButton}
+                    onPress={() => setTemplateModalVisible(false)}
+                  >
+                    <Text style={styles.modalGhostText}>取消</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.modalPrimaryButton}
+                    onPress={addCustomTemplateMetrics}
+                  >
+                    <Text style={styles.modalPrimaryText}>新增模板内容</Text>
+                  </Pressable>
+                </View>
+              </GlassView>
             </Pressable>
           </Pressable>
         </Modal>
@@ -6286,6 +6470,7 @@ const styles = StyleSheet.create({
     padding: 20
   },
   modalCard: {
+    backgroundColor: "#ffffff",
     gap: 10,
     maxWidth: 520,
     padding: 16,
@@ -6300,6 +6485,51 @@ const styles = StyleSheet.create({
     color: "#667085",
     fontSize: 12,
     marginTop: 5
+  },
+  templateList: {
+    gap: 8,
+    marginTop: 10
+  },
+  templateCard: {
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.76)",
+    borderColor: "rgba(29,78,216,0.18)",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "space-between",
+    minHeight: 62,
+    padding: 10
+  },
+  templateCardText: {
+    flex: 1,
+    minWidth: 0
+  },
+  templateTitle: {
+    color: "#111827",
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  templateDescription: {
+    color: "#667085",
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 3
+  },
+  templateCount: {
+    backgroundColor: "rgba(29,78,216,0.1)",
+    borderRadius: 8,
+    color: "#1d4ed8",
+    fontSize: 12,
+    fontWeight: "900",
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 5
+  },
+  templateInput: {
+    minHeight: 104,
+    paddingTop: 10
   },
   severityRow: {
     flexDirection: "row",
@@ -6377,6 +6607,7 @@ const styles = StyleSheet.create({
     fontWeight: "900"
   },
   dialogCard: {
+    backgroundColor: "#ffffff",
     maxWidth: 520,
     padding: 18,
     width: "100%"
